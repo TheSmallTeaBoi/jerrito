@@ -78,8 +78,11 @@ Tracked: `jerrito.mjs`, `README.md`, `AGENTS.md`, `LICENSE`, `flake.nix`,
    a hint pointing at the REPL.
 4. **Per-invocation data must be fresh and local.** The prompt carries the date
    (**local** calendar, not `toISOString()` — UTC made it a day off for a UTC-3
-   user, and the model then reasons about the wrong day), the project root (git
-   toplevel or cwd) and the top-level listing of that root.
+   user, and the model then reasons about the wrong day), a **system line**
+   (user@host, shell, distro from /etc/os-release, arch, cores, RAM — all free
+   `node:os`/`/etc/os-release` reads, no subprocesses; without it the model
+   suggests `apt install` on NixOS), the project root (git toplevel or cwd) and
+   the top-level listing of that root.
 5. **The command name comes from the invocation**, not from a constant:
    `PROG = JERRITO_PROG || basename(argv[1])` — usage, errors, the REPL banner and
    the one-shot hint say `j` when installed, `jerrito` when run as

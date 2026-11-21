@@ -1515,6 +1515,15 @@ function systemPrompt(interactive) {
     ? 'You are in an interactive shell: the user sees your answer and can reply, and earlier turns are above.'
     : 'This is a single command-line invocation: nobody will reply and there is no next turn. Answer the one question completely; never ask a question, never offer to do more, and if you need something from the user, say what in one line.';
 
+  // the machine, from free sources only — no subprocesses. a 2 B model cannot
+  // tell NixOS from Ubuntu or fish from bash and will otherwise suggest
+  // apt/dnf/pip installs that are wrong here
+  const distro = (() => {
+    try { return /^PRETTY_NAME="?([^"\n]+)"?/m.exec(readFileSync('/etc/os-release', 'utf8'))?.[1]; } catch { return ''; }
+  })();
+  const system = `System: ${os.userInfo().username}@${os.hostname()}, shell ${path.basename(process.env.SHELL || '')}, ${distro || 'unknown OS'}, ${os.arch() === 'x64' ? 'x86_64' : os.arch() === 'arm64' ? 'aarch64' : os.arch()}, ${os.cpus().length} cores, ${Math.round(os.totalmem() / 2 ** 30)} GB RAM.`
+    + ' Give commands for THIS system only — not for other distros. Package management follows the distro (NixOS means nix/NixOS module options, not apt/dnf/pip).';
+
   return [
     `You are "jerrito", a terse terminal assistant on Linux. Today is ${today}. You are a small local model: keep answers short.`,
     mode,
@@ -1529,6 +1538,8 @@ function systemPrompt(interactive) {
     '8. Do not call a tool twice with the same arguments; the result is already above. For a large file read the range you need (offset/limit).',
     'Example: "what does jerrito.mjs do?" -> read({"path":"jerrito.mjs"}), then answer from its contents.',
     'Example: "where are screens configured?" -> grep({"pattern":"screens"}), then read the file:line it returns.',
+    '',
+    system,
     '',
     'Project root: ' + ROOT,
     top ? 'Top level: ' + top : '',
