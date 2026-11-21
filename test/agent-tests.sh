@@ -2,7 +2,7 @@
 # agent-loop tests against a scripted mock OpenAI server (no real model)
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-H="$HERE/../helper.mjs"
+H="$HERE/../jerrito.mjs"
 cd "$HERE/.." || exit 1
 pass=0; fail=0
 ok() { echo "PASS  $1"; pass=$((pass+1)); }
@@ -62,7 +62,7 @@ http.createServer(async (req, res) => {
     } else if (user.includes('prose json')) {
       delta(res, { content: '{"a":1} is just a JSON object, not a call' });
     } else if (user.includes('big read')) {
-      delta(res, { tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'read', arguments: '{"path":"helper.mjs","limit":250}' } }] });
+      delta(res, { tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'read', arguments: '{"path":"jerrito.mjs","limit":250}' } }] });
     } else if (!user.includes('empty')) {
       delta(res, { content: 'plain answer' });
     }
@@ -82,7 +82,7 @@ trap 'kill $MOCK 2>/dev/null' EXIT
 for i in $(seq 1 50); do curl -sf http://127.0.0.1:$MP/v1/models >/dev/null 2>&1 && break; sleep 0.2; done
 curl -sf http://127.0.0.1:$MP/v1/models >/dev/null || { echo "mock server did not start"; exit 1; }
 
-run() { timeout 30 env HELPER_BASE_URL=http://127.0.0.1:$MP/v1 ${EXTRA:-} node "$H" "$1" 2>&1; }
+run() { timeout 30 env JERRITO_BASE_URL=http://127.0.0.1:$MP/v1 ${EXTRA:-} node "$H" "$1" 2>&1; }
 
 out=$(run "call two tools please"); c=$?
 [ "$c" = 0 ] && ok "two parallel tool calls: exit 0" || no "two parallel tool calls: exit" "got $c"
@@ -120,7 +120,7 @@ out=$(run "use unknown tool"); c=$?
 has "unknown tool: names the bad tool" "Unknown tool" "$out"
 has "unknown tool: lists real tools" "Available: read, grep, web_search, web_fetch" "$out"
 
-out=$(EXTRA="HELPER_MAX_CHARS=1200" run "big read"); c=$?
+out=$(EXTRA="JERRITO_MAX_CHARS=1200" run "big read"); c=$?
 [ "$c" = 0 ] && ok "big read + tiny budget: no hang" || no "big read + tiny budget" "exit $c (timeout?)"
 has "big read + tiny budget: answered" "tools=1" "$out"
 
@@ -128,13 +128,13 @@ out=$(run "empty"); c=$?
 [ "$c" = 0 ] && ok "empty response: exit 0" || no "empty response: exit" "got $c"
 has "empty response: hint printed" "empty response" "$out"
 
-out=$(EXTRA="HELPER_STATS=1" run "plain question"); c=$?
+out=$(EXTRA="JERRITO_STATS=1" run "plain question"); c=$?
 [ "$c" = 0 ] && ok "plain question: exit 0" || no "plain question: exit" "got $c"
 has "plain question: streamed content" "plain answer" "$out"
 has "plain question: stats line when asked" "tok" "$out"
 
 rm -f /tmp/mock-agent.log
-out=$(EXTRA="HELPER_STEPS=2" run "loop forever"); c=$?
+out=$(EXTRA="JERRITO_STEPS=2" run "loop forever"); c=$?
 [ "$c" = 0 ] && ok "tool-loop: exit 0" || no "tool-loop: exit" "got $c"
 has   "tool-loop: answers after the tool budget" "forced answer" "$out"
 hasnt "tool-loop: no 'stopped' shrug" "stopped: max tool steps" "$out"

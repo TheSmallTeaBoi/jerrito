@@ -2,7 +2,7 @@
 # rendering: markdown styling, and the thinking/tool panel collapsing on a TTY
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-H="$HERE/../helper.mjs"
+H="$HERE/../jerrito.mjs"
 cd "$HERE/.." || exit 1
 pass=0; fail=0
 ok() { echo "PASS  $1"; pass=$((pass+1)); }
@@ -12,7 +12,7 @@ hasnt() { local n="$1" s="$2" o="$3"; case "$o" in *"$s"*) no "$n" "unexpected '
 
 echo "== markdown styling (unit) =="
 cat > /tmp/md-test.mjs <<'EOF'
-const { styleMdLine } = await import(process.env.HELPER_FILE);
+const { styleMdLine } = await import(process.env.JERRITO_FILE);
 let fail = 0;
 const ok = (n, c, extra = '') => { if (c) console.log('PASS  ' + n); else { console.log('FAIL  ' + n + (extra ? '  <<< ' + extra : '')); fail++; } };
 const fresh = () => ({ inFence: false });
@@ -39,10 +39,10 @@ ok('code inside bold survives', s('**a `c` b**').includes('\x1b[36mc\x1b[39m'));
 if (process.env.WITHOUT_COLOR) ok('no escape codes without colour', s('**x**') === '**x**');
 process.exit(fail ? 1 : 0);
 EOF
-out=$(FORCE_COLOR=1 HELPER_FILE="$H" node /tmp/md-test.mjs 2>&1); echo "$out"
+out=$(FORCE_COLOR=1 JERRITO_FILE="$H" node /tmp/md-test.mjs 2>&1); echo "$out"
 pass=$((pass + $(printf '%s\n' "$out" | grep -c '^PASS')))
 fail=$((fail + $(printf '%s\n' "$out" | grep -c '^FAIL')))
-if WITHOUT_COLOR=1 HELPER_FILE="$H" node -e 'const { styleMdLine } = await import(process.env.HELPER_FILE); process.exit(styleMdLine("**x**", { inFence: false }) === "**x**" ? 0 : 1)'; then
+if WITHOUT_COLOR=1 JERRITO_FILE="$H" node -e 'const { styleMdLine } = await import(process.env.JERRITO_FILE); process.exit(styleMdLine("**x**", { inFence: false }) === "**x**" ? 0 : 1)'; then
   ok "no escape codes without colour"
 else
   no "no escape codes without colour"
@@ -75,8 +75,8 @@ http.createServer(async (req, res) => {
     const args = many
       ? ['a1.sh', 'a2.sh', 'a3.sh', 'a4.sh', 'a5.sh', 'a6.sh', 'a7.sh'].map((p) => ({ path: p, limit: 5 }))
       : abs
-        ? [{ path: root + '/helper.mjs', limit: 5 }, { path: root + '/helper.mjs', offset: 20, limit: 5 }]
-        : [{ path: 'helper.mjs', limit: 5 }, { path: 'helper.mjs', offset: 20, limit: 5 }];
+        ? [{ path: root + '/jerrito.mjs', limit: 5 }, { path: root + '/jerrito.mjs', offset: 20, limit: 5 }]
+        : [{ path: 'jerrito.mjs', limit: 5 }, { path: 'jerrito.mjs', offset: 20, limit: 5 }];
     args.forEach((a, i) => delta(res, { tool_calls: [{ index: i, id: 'c' + i, type: 'function', function: { name: 'read', arguments: JSON.stringify(a) } }] }));
   } else if (user.includes('empty')) {
     // tool call, then nothing: exercises the empty-response path while a panel is on screen
@@ -96,25 +96,25 @@ trap 'kill $MOCK 2>/dev/null' EXIT
 for i in $(seq 1 50); do curl -sf http://127.0.0.1:$MP/v1/models >/dev/null 2>&1 && break; sleep 0.2; done
 
 Q="read the project"
-pty_out=$(script -qec "env HELPER_BASE_URL=http://127.0.0.1:$MP/v1 node $H '$Q'" /dev/null 2>&1 | tr -d '\r')
-pipe_out=$(env HELPER_BASE_URL=http://127.0.0.1:$MP/v1 node "$H" "$Q" 2>&1)
-pipe_forced=$(env HELPER_BASE_URL=http://127.0.0.1:$MP/v1 FORCE_COLOR=1 node "$H" "$Q" 2>&1)
+pty_out=$(script -qec "env JERRITO_BASE_URL=http://127.0.0.1:$MP/v1 node $H '$Q'" /dev/null 2>&1 | tr -d '\r')
+pipe_out=$(env JERRITO_BASE_URL=http://127.0.0.1:$MP/v1 node "$H" "$Q" 2>&1)
+pipe_forced=$(env JERRITO_BASE_URL=http://127.0.0.1:$MP/v1 FORCE_COLOR=1 node "$H" "$Q" 2>&1)
 
 has   "pty: summary line shown" "▸" "$pty_out"
 has   "pty: answer styled bold" "$(printf '\033[1mbold')" "$pty_out"
 has   "pty: cursor erase sequence used" "$(printf '\033[')" "$pty_out"
 hasnt "pty: no raw ** markers left" "**" "$pty_out"
-has   "pty: summary names the tool arguments" "read helper.mjs:1-5" "$pty_out"
-has   "pty: a second range of the same file is not a duplicate" "read helper.mjs:20-24" "$pty_out"
+has   "pty: summary names the tool arguments" "read jerrito.mjs:1-5" "$pty_out"
+has   "pty: a second range of the same file is not a duplicate" "read jerrito.mjs:20-24" "$pty_out"
 hasnt "pty: ranges of one file are not collapsed into x2" "×2" "$pty_out"
 after_summary=$(awk '/▸/ { f = 1; next } f' <<< "$pty_out")
 hasnt "pty: panel not redrawn after the summary" "⚙" "$after_summary"
 
-abs_out=$(script -qec "env HELPER_BASE_URL=http://127.0.0.1:$MP/v1 node $H 'absolute path'" /dev/null 2>&1 | tr -d '\r')
-has   "pty: absolute paths render relative to the project root" "read helper.mjs:1-5" "$abs_out"
+abs_out=$(script -qec "env JERRITO_BASE_URL=http://127.0.0.1:$MP/v1 node $H 'absolute path'" /dev/null 2>&1 | tr -d '\r')
+has   "pty: absolute paths render relative to the project root" "read jerrito.mjs:1-5" "$abs_out"
 hasnt "pty: the project root is not repeated in the panel" "$PWD" "$abs_out"
 
-many_out=$(script -qec "env HELPER_BASE_URL=http://127.0.0.1:$MP/v1 node $H 'many reads'" /dev/null 2>&1 | tr -d '\r')
+many_out=$(script -qec "env JERRITO_BASE_URL=http://127.0.0.1:$MP/v1 node $H 'many reads'" /dev/null 2>&1 | tr -d '\r')
 line=$(awk '/▸/ { print; exit }' <<< "$many_out")
 grep -qE '\+[0-9]+ more' <<< "$line" && ok "pty: a long tool list collapses to a count" || no "pty: long tool list collapses" "$line"
 grep -qE '\.s \.\.\.' <<< "$line" && no "pty: names are not cut mid-token" "$line" || ok "pty: names are not cut mid-token"
@@ -128,7 +128,7 @@ hasnt "pipe + FORCE_COLOR: no cursor erasing" "$(printf '\033[J')" "$pipe_forced
 has   "pty: footer shows tok/s" "tok/s" "$pty_out"
 hasnt "pipe: no footer in piped output" "tok/s" "$pipe_out"
 
-empty_out=$(script -qec "env HELPER_BASE_URL=http://127.0.0.1:$MP/v1 node $H 'empty answer'" /dev/null 2>&1 | tr -d '\r')
+empty_out=$(script -qec "env JERRITO_BASE_URL=http://127.0.0.1:$MP/v1 node $H 'empty answer'" /dev/null 2>&1 | tr -d '\r')
 case "$empty_out" in
   *"(empty response"*|*"(no answer after"*) ok "pty: empty answer still prints the notice";;
   *) no "pty: empty answer still prints the notice" "$(printf %s "$empty_out" | tail -c 160)";;

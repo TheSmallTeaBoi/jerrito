@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * helper — a stupid-minimal terminal helper for small local models.
+ * jerrito — a stupid-minimal little helper for small local models.
  *
  * Three tools, nothing else:
  *   web_search  DDG lite (+ HTML/Brave fallback), filtered to title / url / description
@@ -29,35 +29,35 @@ const COLOR = Boolean((process.stdout.isTTY && !process.env.NO_COLOR)
 const paint = (code) => (s) => (COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
 const dim = paint('2'), cyan = paint('36'), yellow = paint('33'), red = paint('31');
 
-// the command you actually typed: `h` when installed (the wrapper exports
-// HELPER_PROG), else the file name, so `node helper.mjs` still says "helper"
-const PROG = (process.env.HELPER_PROG || path.basename(process.argv[1] || 'h')).replace(/\.m?js$/, '');
+// the command you actually typed: `j` when installed (the wrapper exports
+// JERRITO_PROG), else the file name, so `node jerrito.mjs` still says "jerrito"
+const PROG = (process.env.JERRITO_PROG || path.basename(process.argv[1] || 'j')).replace(/\.m?js$/, '');
 
 const num = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
-const ENV_BASE = process.env.HELPER_BASE_URL || process.env.OPENAI_BASE_URL || '';
+const ENV_BASE = process.env.JERRITO_BASE_URL || process.env.OPENAI_BASE_URL || '';
 
 let CFG = {
   base: (ENV_BASE || 'http://127.0.0.1:9931/v1').replace(/\/+$/, ''),
   baseExplicit: Boolean(ENV_BASE),          // user pointed us at a server: never spawn
-  model: process.env.HELPER_MODEL || '',
-  modelFile: process.env.HELPER_MODEL_FILE || '',
-  key: process.env.HELPER_API_KEY || process.env.OPENAI_API_KEY || 'none',
-  temp: num(process.env.HELPER_TEMP, 0.2),
-  maxTokens: num(process.env.HELPER_MAX_TOKENS, 2048),
-  stats: process.env.HELPER_STATS === '1',
-  steps: num(process.env.HELPER_STEPS, 8),
-  chars: num(process.env.HELPER_MAX_CHARS, 24000),   // history budget (chars)
-  maxResults: num(process.env.HELPER_SEARCH_RESULTS, 6),
-  fetchChars: num(process.env.HELPER_FETCH_CHARS, 6000),
-  readLines: num(process.env.HELPER_READ_LINES, 250),
+  model: process.env.JERRITO_MODEL || '',
+  modelFile: process.env.JERRITO_MODEL_FILE || '',
+  key: process.env.JERRITO_API_KEY || process.env.OPENAI_API_KEY || 'none',
+  temp: num(process.env.JERRITO_TEMP, 0.2),
+  maxTokens: num(process.env.JERRITO_MAX_TOKENS, 2048),
+  stats: process.env.JERRITO_STATS === '1',
+  steps: num(process.env.JERRITO_STEPS, 8),
+  chars: num(process.env.JERRITO_MAX_CHARS, 24000),   // history budget (chars)
+  maxResults: num(process.env.JERRITO_SEARCH_RESULTS, 6),
+  fetchChars: num(process.env.JERRITO_FETCH_CHARS, 6000),
+  readLines: num(process.env.JERRITO_READ_LINES, 250),
 };
 if (!/\/v\d+$/.test(CFG.base)) CFG.base += '/v1';
 
 // optional sampler overrides; only sent when set, so servers/APIs that reject
 // extra fields are unaffected
 const SAMPLING = {};
-for (const [env, key] of [['HELPER_TOP_P', 'top_p'], ['HELPER_TOP_K', 'top_k'],
-  ['HELPER_MIN_P', 'min_p'], ['HELPER_REPEAT_PENALTY', 'repeat_penalty']]) {
+for (const [env, key] of [['JERRITO_TOP_P', 'top_p'], ['JERRITO_TOP_K', 'top_k'],
+  ['JERRITO_MIN_P', 'min_p'], ['JERRITO_REPEAT_PENALTY', 'repeat_penalty']]) {
   const v = Number(process.env[env]);
   if (Number.isFinite(v) && process.env[env] !== '') SAMPLING[key] = v;
 }
@@ -359,7 +359,7 @@ async function searchBrave(query) {
   return rows;
 }
 
-const searxBase = () => (process.env.HELPER_SEARX_URL || readConfig().searx || '').replace(/\/+$/, '');
+const searxBase = () => (process.env.JERRITO_SEARX_URL || readConfig().searx || '').replace(/\/+$/, '');
 
 // 4get (https://4get.ca) is a search proxy: it scrapes from *its* IP, so it keeps
 // working when our own IP is rate-limited. Public instances come and go, so try
@@ -378,7 +378,7 @@ const offValue = (v) => /^(off|0|none|false|no)$/i.test(String(v ?? '').trim());
 
 /** explicit instance list (env or config) wins over the auto-updated one */
 function explicitFourgetBases() {
-  const v = process.env.HELPER_4GET_URL ?? readConfig().fourget;
+  const v = process.env.JERRITO_4GET_URL ?? readConfig().fourget;
   if (v === undefined || v === null || String(v).trim() === '') return null;
   if (offValue(v)) return [];
   return String(v).split(',').map(trimBase).filter(Boolean);
@@ -387,7 +387,7 @@ function explicitFourgetBases() {
 /** where the community list comes from: the 4get repo's INSTANCES array,
  *  which is what every instance's /instances page renders */
 function fourgetFinder() {
-  const v = process.env.HELPER_4GET_FINDER ?? readConfig().fourgetFinder;
+  const v = process.env.JERRITO_4GET_FINDER ?? readConfig().fourgetFinder;
   if (v !== undefined && v !== null && String(v).trim() !== '') {
     return offValue(v) ? '' : String(v).trim();
   }
@@ -534,7 +534,7 @@ async function searchSearx(query) {
 
 async function webSearch(query) {
   const attempts = [];
-  if (!offValue(process.env.HELPER_4GET_URL ?? readConfig().fourget)) attempts.push(['4get', search4get]);
+  if (!offValue(process.env.JERRITO_4GET_URL ?? readConfig().fourget)) attempts.push(['4get', search4get]);
   if (searxBase()) attempts.push(['searxng', searchSearx]);
   attempts.push(['duckduckgo lite', searchDDG], ['duckduckgo html', searchDDGHtml], ['brave', searchBrave]);
   const notes = [];
@@ -847,15 +847,32 @@ const asCall = ({ name, args }) => ({
 });
 
 // ------------------------------------------------- model provisioning ----
-// `helper "question"` should not require a hand-started llama-server: find the
+// `jerrito "question"` should not require a hand-started llama-server: find the
 // binary, pick or fetch a model, start it detached, and reuse it next time.
 const HOME = os.homedir();
-const CACHE_DIR = path.join(HOME, '.cache/helper');
+const CACHE_DIR = path.join(HOME, '.cache/jerrito');
 const MODELS_DIR = path.join(CACHE_DIR, 'models');
 const STATE_FILE = path.join(CACHE_DIR, 'server.json');
 const LOG_FILE = path.join(CACHE_DIR, 'llama-server.log');
-const CONFIG_FILE = path.join(HOME, '.config/helper/config.json');
+const CONFIG_FILE = path.join(HOME, '.config/jerrito/config.json');
 const LOCK_FILE = path.join(CACHE_DIR, 'server.lock');
+
+// one-time migration from the pre-rename name (~/.cache/helper): move the
+// 1.5 GB model and server state instead of re-downloading. best-effort — an
+// old server keeps running either way; `jerrito --stop` then restarts it
+function migrateFromHelper() {
+  for (const [from, to] of [
+    [path.join(HOME, '.cache/helper'), CACHE_DIR],
+    [path.join(HOME, '.config/helper'), path.dirname(CONFIG_FILE)],
+  ]) {
+    try {
+      if (!existsSync(from) || existsSync(to)) continue;
+      mkdirSync(path.dirname(to), { recursive: true });
+      renameSync(from, to);
+    } catch {}
+  }
+}
+migrateFromHelper();
 
 const RECOMMENDED = {
   name: 'Sharp-MiniCPM5-2B-Q4_K_S.gguf',
@@ -875,7 +892,7 @@ const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { re
 function findServerBinary() {
   const cfg = readConfig();
   const dirs = [
-    process.env.HELPER_BIN_DIR, cfg.binDir,
+    process.env.JERRITO_BIN_DIR, cfg.binDir,
     path.join(HOME, '.nix-profile/bin'), path.join(HOME, '.local/bin'),
     '/run/current-system/sw/bin', '/usr/local/bin', '/usr/bin',
     ...(process.env.PATH || '').split(':'),
@@ -892,7 +909,7 @@ function findServerBinary() {
 function findLocalModels() {
   const cfg = readConfig();
   const roots = [
-    cfg.modelsDir, process.env.HELPER_MODEL_DIR,
+    cfg.modelsDir, process.env.JERRITO_MODEL_DIR,
     path.join(HOME, '.cache/huggingface/hub'), path.join(HOME, 'models'),
     path.join(HOME, '.local/share/models'), path.join(HOME, '.cache/llama.cpp'),
   ].filter((r) => r && existsSync(r));
@@ -931,7 +948,7 @@ function modelScore(name, size) {
   if (/q4_k_m|q4_k_s|q5_k_m|q6_k|q8_0/.test(n)) s += 1;
   if (/3d|glb|vision|[-_]vl|embed|whisper|base\.gguf|draft/.test(n)) s -= 5;
   if (size < 400e6) s -= 2;          // 0.5B models rarely route tools
-  if (size > 12e9) s -= 4;           // big for a laptop helper
+  if (size > 12e9) s -= 4;           // big for a laptop model
   return s;
 }
 
@@ -980,7 +997,7 @@ async function ensureModel() {
   try {
     return await downloadModel(RECOMMENDED.url, dest, RECOMMENDED.bytes);
   } catch (e) {
-    throw new Error(`could not fetch a model (${e.message}). Put a .gguf somewhere under ~/models, or set HELPER_MODEL_FILE=/path/to.gguf`);
+    throw new Error(`could not fetch a model (${e.message}). Put a .gguf somewhere under ~/models, or set JERRITO_MODEL_FILE=/path/to.gguf`);
   }
 }
 
@@ -993,7 +1010,7 @@ const presetFor = (model) => {
 function applyPreset(preset) {
   // model-recommended sampling; explicit env vars always win
   const p = preset?.sampling || preset || {};
-  if (p.temperature != null && !process.env.HELPER_TEMP) CFG.temp = p.temperature;
+  if (p.temperature != null && !process.env.JERRITO_TEMP) CFG.temp = p.temperature;
   for (const k of ['top_p', 'top_k', 'min_p', 'repeat_penalty']) {
     if (p[k] != null && !ENV_SAMPLING.has(k)) SAMPLING[k] = p[k];
   }
@@ -1023,11 +1040,11 @@ function serverArgs(model, port, withJinja) {
   const cfg = readConfig();
   // 16k default: MiniCPM's chat template renders the tool definitions inline,
   // which costs ~7k tokens before a single word of the question
-  const ctx = num(process.env.HELPER_CTX, num(cfg.context, 16384));
+  const ctx = num(process.env.JERRITO_CTX, num(cfg.context, 16384));
   const threads = num(cfg.threads, Math.max(2, Math.min(12, os.cpus().length - 1)));
   // GPU layers: llama.cpp offloads what it can; -ngl 0 forces CPU, and a
   // CPU-only build ignores the flag. Env wins over config wins over default.
-  const envNgl = process.env.HELPER_NGL;
+  const envNgl = process.env.JERRITO_NGL;
   const ngl = envNgl !== undefined && envNgl !== '' ? Number(envNgl)
     : cfg.gpuLayers !== undefined ? Number(cfg.gpuLayers) : 99;
   const extra = cfg.serverArgs || [];
@@ -1051,7 +1068,7 @@ const logTail = (n = 800) => {
   try { return readFileSync(LOG_FILE, 'utf8').slice(-n); } catch { return ''; }
 };
 
-// one spawn at a time: two terminals starting `helper` together must not race
+// one spawn at a time: two terminals starting `jerrito` together must not race
 // on the model download or start two servers
 function acquireLock() {
   try {
@@ -1083,7 +1100,7 @@ async function adoptIfUp(st) {
   return false;
 }
 
-/** wait for a server another helper is starting (or one that is already up) */
+/** wait for a server another jerrito is starting (or one that is already up) */
 async function waitForServer(ms) {
   const until = Date.now() + ms;
   while (Date.now() < until) {
@@ -1107,9 +1124,9 @@ async function waitHealthy(base, pid, ms) {
 
 async function ensureServer() {
   // 1. the user pointed at a server: use it, never spawn
-  if (CFG.baseExplicit || process.env.HELPER_NO_SPAWN === '1') {
+  if (CFG.baseExplicit || process.env.JERRITO_NO_SPAWN === '1') {
     if (await healthy(CFG.base)) return;
-    const why = CFG.baseExplicit ? 'HELPER_BASE_URL is set' : 'HELPER_NO_SPAWN=1';
+    const why = CFG.baseExplicit ? 'JERRITO_BASE_URL is set' : 'JERRITO_NO_SPAWN=1';
     throw new Error(`no server answering at ${CFG.base} (${why}, so ${PROG} will not start one)`);
   }
 
@@ -1126,15 +1143,15 @@ async function ensureServer() {
     }
   }
   try {
-    // 4. start one (re-check: the other helper may have just finished)
+    // 4. start one (re-check: the other jerrito may have just finished)
     if (await adoptIfUp(readState())) return;
 
     const bin = findServerBinary();
     if (!bin) {
       throw new Error('llama-server not found on PATH.\n' +
         '  nix:      nix develop    (or `direnv allow` once, this repo has a flake)\n' +
-        '  anywhere: install llama.cpp, or set HELPER_BIN_DIR to its bin/, or\n' +
-        '            HELPER_BASE_URL to an existing server (e.g. ollama on :11434)');
+        '  anywhere: install llama.cpp, or set JERRITO_BIN_DIR to its bin/, or\n' +
+        '            JERRITO_BASE_URL to an existing server (e.g. ollama on :11434)');
     }
     const model = await ensureModel();
     const preset = presetFor(model);
@@ -1175,11 +1192,11 @@ function stopServer() {
   console.log(`stopped llama-server (pid ${st.pid}, ${path.basename(st.model || '')})`);
 }
 
-/** `helper --instances [refresh]` */
+/** `jerrito --instances [refresh]` */
 async function listInstances(refresh) {
   const explicit = explicitFourgetBases();
   if (explicit) {
-    console.log(`explicit list (HELPER_4GET_URL / config "fourget"): ${explicit.length || 'none (disabled)'}`);
+    console.log(`explicit list (JERRITO_4GET_URL / config "fourget"): ${explicit.length || 'none (disabled)'}`);
     explicit.forEach((u) => console.log('  ' + u));
     return;
   }
@@ -1499,7 +1516,7 @@ function systemPrompt(interactive) {
     : 'This is a single command-line invocation: nobody will reply and there is no next turn. Answer the one question completely; never ask a question, never offer to do more, and if you need something from the user, say what in one line.';
 
   return [
-    `You are "helper", a terse terminal assistant on Linux. Today is ${today}. You are a small local model: keep answers short.`,
+    `You are "jerrito", a terse terminal assistant on Linux. Today is ${today}. You are a small local model: keep answers short.`,
     mode,
     'Rules:',
     '1. Never guess file contents or file names. For this project, grep first (pattern; | for alternatives), then read only the lines it points at.',
@@ -1510,7 +1527,7 @@ function systemPrompt(interactive) {
     '6. Stop calling tools once you have enough to answer. Two searches that did not help means: say so.',
     '7. End with the answer, not with a question or an offer to do more.',
     '8. Do not call a tool twice with the same arguments; the result is already above. For a large file read the range you need (offset/limit).',
-    'Example: "what does helper.mjs do?" -> read({"path":"helper.mjs"}), then answer from its contents.',
+    'Example: "what does jerrito.mjs do?" -> read({"path":"jerrito.mjs"}), then answer from its contents.',
     'Example: "where are screens configured?" -> grep({"pattern":"screens"}), then read the file:line it returns.',
     '',
     'Project root: ' + ROOT,
@@ -1724,8 +1741,8 @@ async function ask(question, messages, signal) {
       render.footer();
       if (!content.trim()) {
         process.stdout.write(yellow(step === 0
-          ? '(empty response — try a bigger HELPER_MAX_TOKENS)'
-          : `(no answer after ${step} tool steps — try a larger HELPER_STEPS or a model that routes tools better)`) + '\n');
+          ? '(empty response — try a bigger JERRITO_MAX_TOKENS)'
+          : `(no answer after ${step} tool steps — try a larger JERRITO_STEPS or a model that routes tools better)`) + '\n');
       }
       process.stdout.write('\n');
       return content;
@@ -1765,7 +1782,7 @@ function usage() {
     [PROG + ' -t <tool> <arg>', 'run a single tool and print raw output (debug)'],
   ];
   const w = Math.max(...rows.map(([a]) => a.length));
-  console.log(`${PROG} — stupid-minimal terminal helper for small local models
+  console.log(`${PROG} — stupid-minimal little helper for small local models
 
 usage:
 ${rows.map(([a, b]) => '  ' + a.padEnd(w) + '  ' + b).join('\n')}
@@ -1776,14 +1793,14 @@ options:
   -h, --help             this text
 
 First run: finds llama-server (PATH or nix store), picks a tool-capable .gguf on
-this machine, or downloads Sharp-MiniCPM5-2B once to ~/.cache/helper/models,
+this machine, or downloads Sharp-MiniCPM5-2B once to ~/.cache/jerrito/models,
 then starts it detached on a free port and reuses it. Model + server settings
-live in ~/.config/helper/config.json.
+live in ~/.config/jerrito/config.json.
 
-env: HELPER_MODEL_FILE HELPER_BASE_URL HELPER_API_KEY HELPER_TEMP HELPER_MAX_TOKENS
-     HELPER_TOP_P HELPER_TOP_K HELPER_MIN_P HELPER_REPEAT_PENALTY HELPER_STATS
-     HELPER_STEPS HELPER_MAX_CHARS HELPER_SEARCH_RESULTS HELPER_FETCH_CHARS
-     HELPER_READ_LINES HELPER_NO_SPAWN HELPER_BIN_DIR
+env: JERRITO_MODEL_FILE JERRITO_BASE_URL JERRITO_API_KEY JERRITO_TEMP JERRITO_MAX_TOKENS
+     JERRITO_TOP_P JERRITO_TOP_K JERRITO_MIN_P JERRITO_REPEAT_PENALTY JERRITO_STATS
+     JERRITO_STEPS JERRITO_MAX_CHARS JERRITO_SEARCH_RESULTS JERRITO_FETCH_CHARS
+     JERRITO_READ_LINES JERRITO_NO_SPAWN JERRITO_BIN_DIR
 `);
 }
 

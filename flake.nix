@@ -1,5 +1,5 @@
 {
-  description = "helper — stupid-minimal terminal helper for small local models (command: h)";
+  description = "jerrito — stupid-minimal little helper for small local models (command: j)";
 
   # nixos-unstable, pinned by flake.lock (commit it).
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -23,7 +23,7 @@
       mkPackage =
         pkgs: cpu:
         pkgs.writeShellApplication {
-          name = "h";
+          name = "j";
           runtimeInputs = [
             pkgs.nodejs_24
             (llama pkgs cpu)
@@ -31,7 +31,7 @@
           ];
           # HELPER_PROG is what usage/errors call themselves; the wrapped node
           # cannot see the name it was invoked as otherwise
-          text = ''export HELPER_PROG=h; exec node ${./helper.mjs} "$@"'';
+          text = ''export JERRITO_PROG=j; exec node ${./jerrito.mjs} "$@"'';
         };
     in
     {
@@ -46,16 +46,16 @@
 
           shellHook = ''
             mkdir -p .direnv/bin
-            printf '#!/bin/sh\nexport HELPER_PROG=h\nexec node "%s/helper.mjs" "$@"\n' "$PWD" > .direnv/bin/h
-            chmod +x .direnv/bin/h
-            rm -f .direnv/bin/helper
+            printf '#!/bin/sh\nexport JERRITO_PROG=j\nexec node "%s/jerrito.mjs" "$@"\n' "$PWD" > .direnv/bin/j
+            chmod +x .direnv/bin/j
+            rm -f .direnv/bin/jelper
             export PATH="$PWD/.direnv/bin:$PATH"
-            echo "helper dev shell · command: h · $(node -v) · llama.cpp $(llama-server --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo ready)"
+            echo "jerrito dev shell · command: j · $(node -v) · llama.cpp $(llama-server --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo ready)"
           '';
         };
       });
 
-      # self-contained helper for `nix run` / `nix profile install`
+      # self-contained for `nix run` / `nix profile install`
       packages = forAll (pkgs: {
         default = mkPackage pkgs false;
         cpu = mkPackage pkgs true;
@@ -64,24 +64,24 @@
       apps = forAll (pkgs: {
         default = {
           type = "app";
-          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/h";
+          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/j";
         };
       });
 
-      # `nixpkgs.overlays = [ inputs.helper.overlays.default ];` -> pkgs.h, built
+      # `nixpkgs.overlays = [ inputs.jerrito.overlays.default ];` -> pkgs.j, built
       # against *your* nixpkgs instead of pulling a second copy of it
       overlays.default = final: prev: {
-        h = mkPackage final false;
-        h-cpu = mkPackage final true;
+        j = mkPackage final false;
+        j-cpu = mkPackage final true;
       };
 
-      # NixOS: `imports = [ inputs.helper.nixosModules.default ];` then
-      # `programs.helper.enable = true;`
+      # NixOS: `imports = [ inputs.jerrito.nixosModules.default ];` then
+      # `programs.jerrito.enable = true;`
       nixosModules.default =
         { config, lib, pkgs, ... }:
         {
-          options.programs.helper = {
-            enable = lib.mkEnableOption "helper, a stupid-minimal local-model CLI (installs `h`)";
+          options.programs.jerrito = {
+            enable = lib.mkEnableOption "jerrito, a stupid-minimal local-model CLI (installs `j`)";
             gpu = lib.mkOption {
               type = lib.types.bool;
               default = true;
@@ -89,16 +89,16 @@
             };
             package = lib.mkOption {
               type = lib.types.package;
-              default = pkgs.h;
-              defaultText = lib.literalExpression "pkgs.h";
-              description = "Package to install. Use pkgs.h-cpu for a CPU-only build.";
+              default = pkgs.j;
+              defaultText = lib.literalExpression "pkgs.j";
+              description = "Package to install. Use pkgs.j-cpu for a CPU-only build.";
             };
           };
 
-          config = lib.mkIf config.programs.helper.enable {
+          config = lib.mkIf config.programs.jerrito.enable {
             nixpkgs.overlays = [ self.overlays.default ];
-            environment.systemPackages = [ config.programs.helper.package ];
-            hardware.graphics.enable = lib.mkIf config.programs.helper.gpu (lib.mkDefault true);
+            environment.systemPackages = [ config.programs.jerrito.package ];
+            hardware.graphics.enable = lib.mkIf config.programs.jerrito.gpu (lib.mkDefault true);
           };
         };
     };

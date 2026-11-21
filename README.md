@@ -1,8 +1,10 @@
-# helper
+# jerrito
 
-A stupid-minimal terminal helper for small local models. The command it installs
-is **`h`** (the project is called helper; typing `helper` is not something you
-should have to do).
+A stupid-minimal little helper for small local models. The command it installs
+is **`j`** (the project is called jerrito; typing `jerrito` is not something you
+should have to do). It used to be called helper (`h`); the npm cache, config
+and env vars moved with the rename — an old `~/.cache/helper` is adopted on
+first run.
 
 > [!WARNING]
 > **Vibe coded.** Nearly every line here was written by a language model in
@@ -13,12 +15,12 @@ should have to do).
 > it, and expect rough edges.
 
 ```
-$ h "what is this project?"
+$ j "what is this project?"
 
   ⚙ read .
-  ⚙ read helper.mjs
+  ⚙ read jerrito.mjs
 
-helper.mjs is a single-file CLI that answers questions using four tools:
+jerrito.mjs is a single-file CLI that answers questions using four tools:
 grep and read (local files), web_search and web_fetch. It runs a small local model...
 ```
 
@@ -42,10 +44,10 @@ Either of these:
 
 - **Nix** (recommended): `nix develop` — or `direnv allow` once — gives you
   Node 24, a GPU-capable `llama.cpp` (Vulkan on Linux, Metal on macOS) and a
-  `helper` wrapper on PATH. Nothing else to install.
+  `j` wrapper on PATH. Nothing else to install.
   `nix run . -- "question"` works without entering a shell, and
-  `nix profile install .` puts the packaged `h` on your PATH.
-- **No Nix**: Node 20+ with `llama-server` on PATH, or `HELPER_BASE_URL`
+  `nix profile install .` puts the packaged `j` on your PATH.
+- **No Nix**: Node 20+ with `llama-server` on PATH, or `JERRITO_BASE_URL`
   pointing at a server you already run (ollama, LM Studio, another box).
 
 Either way you never start the model server by hand: the first run finds the
@@ -55,31 +57,31 @@ starts it detached, and reuses it from then on.
 ## Usage
 
 ```bash
-nix develop                       # node + llama.cpp + `h` on PATH
-h "what is this project?"         # one-shot answer
-h                                 # interactive shell (/reset, /help, /exit)
+nix develop                       # node + llama.cpp + `j` on PATH
+j "what is this project?"         # one-shot answer
+j                                 # interactive shell (/reset, /help, /exit)
 
-h --status                        # is the model server up?
-h --stop                          # stop the server it started
-h --instances                     # which 4get search instances it uses (add: refresh)
-h -t web_search q                 # run one tool, print raw output (debugging)
-h -t read .
-h -t web_fetch https://nix.dev/
+j --status                        # is the model server up?
+j --stop                          # stop the server it started
+j --instances                     # which 4get search instances it uses (add: refresh)
+j -t web_search q                 # run one tool, print raw output (debugging)
+j -t read .
+j -t web_fetch https://nix.dev/
 
 -m, --model <path|id>             use this .gguf (remembered) or model id
 -u, --base-url <url>              use an existing server, never spawn
 ```
 
 A one-shot answer is exactly one turn: the model is told there is no next turn,
-so it will not ask you a follow-up. The shell (`h` with no arguments) *does*
+so it will not ask you a follow-up. The shell (`j` with no arguments) *does*
 keep the conversation, and `/reset` clears it.
 
 Make it a normal command on your PATH:
 ```bash
-nix profile install .                     # self-contained: node + llama.cpp + git -> `h`
+nix profile install .                     # self-contained: node + llama.cpp + git -> `j`
 ```
 
-Outside Nix (needs `llama-server` on PATH): `ln -sf "$PWD/helper.mjs" ~/.local/bin/h`
+Outside Nix (needs `llama-server` on PATH): `ln -sf "$PWD/jerrito.mjs" ~/.local/bin/j`
 and `fish_add_path ~/.local/bin`.
 
 ## Install it in your NixOS config
@@ -87,21 +89,21 @@ and `fish_add_path ~/.local/bin`.
 The flake exposes `packages.<system>.{default,cpu}`, `overlays.default` and
 `nixosModules.default`.
 
-**Module** — installs `h`, enables GPU offload, and builds against *your*
+**Module** — installs `j`, enables GPU offload, and builds against *your*
 pinned nixpkgs (no second copy of it):
 
 ```nix
 {
-  inputs.helper.url = "github:TheSmallTeaBoi/helper";
+  inputs.jerrito.url = "github:TheSmallTeaBoi/helper";
 
-  outputs = { self, nixpkgs, helper, ... }: {
+  outputs = { self, nixpkgs, jerrito, ... }: {
     nixosConfigurations.box = nixpkgs.lib.nixosSystem {
       modules = [
-        helper.nixosModules.default
+        jerrito.nixosModules.default
         {
-          programs.helper.enable = true;        # -> `h` on PATH
-          # programs.helper.gpu = false;       # don't enable graphics drivers
-          # programs.helper.package = pkgs.h-cpu;  # CPU-only build
+          programs.jerrito.enable = true;        # -> `j` on PATH
+          # programs.jerrito.gpu = false;       # don't enable graphics drivers
+          # programs.jerrito.package = pkgs.j-cpu;  # CPU-only build
         }
       ];
     };
@@ -114,43 +116,43 @@ pinned nixpkgs (no second copy of it):
 ```nix
 { inputs, pkgs, ... }:
 {
-  nixpkgs.overlays = [ inputs.helper.overlays.default ];
-  environment.systemPackages = [ pkgs.h ];   # or: home.packages = [ pkgs.h ];
+  nixpkgs.overlays = [ inputs.jerrito.overlays.default ];
+  environment.systemPackages = [ pkgs.j ];   # or: home.packages = [ pkgs.j ];
 }
 ```
 
 **No overlay** — simplest, but pulls this flake's own nixpkgs as a second copy:
 
 ```nix
-environment.systemPackages = [ inputs.helper.packages.${pkgs.stdenv.hostPlatform.system}.default ];
+environment.systemPackages = [ inputs.jerrito.packages.${pkgs.stdenv.hostPlatform.system}.default ];
 ```
 
 The package wraps its own `node`, `llama-server` and `git`, so there is nothing
 else to enable. GPU offload needs drivers: the module sets
 `hardware.graphics.enable = true` with `mkDefault` (override it, or use
-`pkgs.h-cpu` on a headless box). Models are still per-user, in
-`~/.cache/helper/models`.
+`pkgs.j-cpu` on a headless box). Models are still per-user, in
+`~/.cache/jerrito/models`.
 
 ## How the model part works
 
 On first use, in order:
 
-1. **Server** — `llama-server` from `HELPER_BIN_DIR`, `~/.config/helper/config.json`,
+1. **Server** — `llama-server` from `JERRITO_BIN_DIR`, `~/.config/jerrito/config.json`,
    or `PATH`. No store scanning: on Nix, the dev shell puts it on PATH.
    It runs detached on a free port; pid/port/model are kept in
-   `~/.cache/helper/server.json` and reused. Server log:
-   `~/.cache/helper/llama-server.log`.
-2. **Model** — `HELPER_MODEL_FILE`, then `~/.config/helper/config.json`, then a
+   `~/.cache/jerrito/server.json` and reused. Server log:
+   `~/.cache/jerrito/llama-server.log`.
+2. **Model** — `JERRITO_MODEL_FILE`, then `~/.config/jerrito/config.json`, then a
    scan of `~/models`, `~/.local/share/models`, `~/.cache/llama.cpp` and the
    HuggingFace cache. A model is only auto-picked if its name looks like an
    instruct/tool-capable build; `.gguf` files that look like base/3D/vision/
    embedding weights are skipped, and anything under 400 MB is ignored.
 3. **Download** — nothing suitable on disk? It fetches
-   `Sharp-MiniCPM5-2B-Q4_K_S.gguf` (1.5 GB) once to `~/.cache/helper/models/`,
+   `Sharp-MiniCPM5-2B-Q4_K_S.gguf` (1.5 GB) once to `~/.cache/jerrito/models/`,
    with a progress bar. That model was the best small model at tool routing in
    testing, and its recommended sampling (`temp 1.0, top_p .95, top_k 20,
    min_p 0`) plus `--jinja` are applied automatically.
-4. **Start** — two `helper` calls at the same time take a short lock, so they
+4. **Start** — two `j` calls at the same time take a short lock, so they
    wait for one server instead of racing on the model download or starting two.
    `--stop` shuts it down; a crashed start leaves a lock that expires after 15
    minutes (an ordinary ctrl-c or crash clears it immediately).
@@ -159,20 +161,20 @@ On first use, in order:
 
 The dev shell uses nixpkgs' `llama-cpp-vulkan`, so any NVIDIA/AMD/Intel GPU is
 used through Vulkan — no CUDA SDK, no rebuild, and it is in the binary cache.
-helper starts the server with `-ngl 99`, so all layers offload when a backend
+jerrito starts the server with `-ngl 99`, so all layers offload when a backend
 is present; a CPU-only llama.cpp just ignores the flag. On NixOS you need
 `hardware.graphics.enable = true` for the Vulkan ICDs (this machine has it).
 
 ```bash
-helper ...                     # all layers to the GPU (default)
-HELPER_NGL=20 helper ...       # partial offload, when VRAM is tight
-HELPER_NGL=0 helper ...        # force CPU
+jerrito ...                     # all layers to the GPU (default)
+JERRITO_NGL=20 jerrito ...       # partial offload, when VRAM is tight
+JERRITO_NGL=0 jerrito ...        # force CPU
 ```
 
 To use CUDA instead, swap `llama-cpp-vulkan` in `flake.nix` for
 `llama-cpp.override { cudaSupport = true; }` (that one builds from source).
 
-Everything is overridable in `~/.config/helper/config.json`:
+Everything is overridable in `~/.config/jerrito/config.json`:
 
 ```json
 {
@@ -192,9 +194,9 @@ Bring your own server instead (ollama, LM Studio, a remote box) and nothing is
 spawned or downloaded:
 
 ```bash
-export HELPER_BASE_URL=http://127.0.0.1:11434
-export HELPER_MODEL=qwen2.5:3b
-h "what does --impure do in nix develop?"
+export JERRITO_BASE_URL=http://127.0.0.1:11434
+export JERRITO_MODEL=qwen2.5:3b
+j "what does --impure do in nix develop?"
 ```
 
 ## Output
@@ -218,7 +220,7 @@ When stdout is a terminal, a dim footer lands under each answer: generation
 speed and tokens (real llama.cpp timings — on other servers approximated by
 counting streamed tokens), how long web_search / web_fetch took, and the tool
 count. Piped output stays clean markdown — the footer is never printed to a
-pipe, and `HELPER_STATS=1` still dumps raw token counts on stderr for
+pipe, and `JERRITO_STATS=1` still dumps raw token counts on stderr for
 debugging.
 ```
 
@@ -233,13 +235,13 @@ underlines, fenced code is left alone (and styles nest, so `**text *with
 italics* and `code`**` works). So this stays clean markdown:
 
 ```bash
-h "how do I pin nixpkgs?" > answer.md
+j "how do I pin nixpkgs?" > answer.md
 ```
 
 Piped output is unformatted markdown (no escape codes), `NO_COLOR` disables
 styling, and `FORCE_COLOR=1` styles a pipe without any cursor movement.
 
-If the model keeps calling tools instead of answering, `HELPER_STEPS` only
+If the model keeps calling tools instead of answering, `JERRITO_STEPS` only
 bounds the tool rounds: the last completion is sent with the tools removed and a
 "answer with what you have" nudge, so a question always ends in an answer (or,
 if the model still writes nothing, an explicit note saying so).
@@ -248,24 +250,24 @@ if the model still writes nothing, an explicit note saying so).
 
 | env | default | what |
 | --- | --- | --- |
-| `HELPER_MODEL_FILE` | auto | .gguf to run |
-| `HELPER_BASE_URL` | auto-spawn | existing OpenAI-compatible server |
-| `HELPER_NO_SPAWN` | unset | `1` never starts a server |
-| `HELPER_BIN_DIR` | auto | folder containing `llama-server` |
-| `HELPER_SEARX_URL` | unset | your own SearXNG base URL (tried 2nd) |
-| `HELPER_4GET_URL` | auto | 4get instance(s), comma separated; `off` disables |
-| `HELPER_4GET_FINDER` | 4get repo | where the instance list is updated from; `off` freezes it |
-| `HELPER_CTX` | `16384` | server context (the template's tool block is ~7k tokens) |
-| `HELPER_NGL` | `99` | GPU layers to offload (`0` = CPU only) |
-| `HELPER_TEMP` | model preset, else `0.2` | temperature |
-| `HELPER_MAX_TOKENS` | `2048` | max answer tokens (thinking models need room) |
-| `HELPER_TOP_P` / `_TOP_K` / `_MIN_P` / `_REPEAT_PENALTY` | model preset | sampler overrides |
-| `HELPER_STEPS` | `8` | tool round-trips before a forced answer |
-| `HELPER_MAX_CHARS` | `24000` | history budget (drops oldest turns) |
-| `HELPER_SEARCH_RESULTS` | `6` | results per search |
-| `HELPER_FETCH_CHARS` | `6000` | page text kept after markdown conversion |
-| `HELPER_READ_LINES` | `250` | lines per file read |
-| `HELPER_STATS` | unset | `1` prints token usage |
+| `JERRITO_MODEL_FILE` | auto | .gguf to run |
+| `JERRITO_BASE_URL` | auto-spawn | existing OpenAI-compatible server |
+| `JERRITO_NO_SPAWN` | unset | `1` never starts a server |
+| `JERRITO_BIN_DIR` | auto | folder containing `llama-server` |
+| `JERRITO_SEARX_URL` | unset | your own SearXNG base URL (tried 2nd) |
+| `JERRITO_4GET_URL` | auto | 4get instance(s), comma separated; `off` disables |
+| `JERRITO_4GET_FINDER` | 4get repo | where the instance list is updated from; `off` freezes it |
+| `JERRITO_CTX` | `16384` | server context (the template's tool block is ~7k tokens) |
+| `JERRITO_NGL` | `99` | GPU layers to offload (`0` = CPU only) |
+| `JERRITO_TEMP` | model preset, else `0.2` | temperature |
+| `JERRITO_MAX_TOKENS` | `2048` | max answer tokens (thinking models need room) |
+| `JERRITO_TOP_P` / `_TOP_K` / `_MIN_P` / `_REPEAT_PENALTY` | model preset | sampler overrides |
+| `JERRITO_STEPS` | `8` | tool round-trips before a forced answer |
+| `JERRITO_MAX_CHARS` | `24000` | history budget (drops oldest turns) |
+| `JERRITO_SEARCH_RESULTS` | `6` | results per search |
+| `JERRITO_FETCH_CHARS` | `6000` | page text kept after markdown conversion |
+| `JERRITO_READ_LINES` | `250` | lines per file read |
+| `JERRITO_STATS` | unset | `1` prints token usage |
 
 Sampler overrides are only sent when set, so servers/APIs that reject extra
 fields are unaffected.
@@ -322,15 +324,15 @@ That is why 4get comes first: it is a proxy — one JSON request
 every instance's `/instances` browser renders:
 
 ```bash
-$ h --instances
+$ j --instances
 21 4get instances (0h old)  ← https://git.lolcat.ca/lolcat/4get/raw/branch/master/data/config.php
   https://4get.ca
   https://search.fischbytes.de
   …
 ```
 
-- cached in `~/.cache/helper/4get-instances.json`, refreshed after 7 days
-  (`h --instances refresh` forces it), or immediately when every instance
+- cached in `~/.cache/jerrito/4get-instances.json`, refreshed after 7 days
+  (`j --instances refresh` forces it), or immediately when every instance
   in the list fails — that is the self-healing path;
 - the instance that answered last is remembered (`lastGood`) and tried first, so
   a repeat search is a single request; the others rotate (`cursor`), so one dead
@@ -338,8 +340,8 @@ $ h --instances
 - instances that time out or bot-wall us are skipped for the rest of the session,
   and each instance is asked with `scraper=ddg` then `yandex`, because upstream
   engines get blocked independently of the instance being healthy;
-- `HELPER_4GET_FINDER=<url>` points the updater elsewhere, `HELPER_4GET_URL`
-  pins your own list and skips the finder entirely, `HELPER_4GET_URL=off`
+- `JERRITO_4GET_FINDER=<url>` points the updater elsewhere, `JERRITO_4GET_URL`
+  pins your own list and skips the finder entirely, `JERRITO_4GET_URL=off`
   disables 4get.
 
 `curl`-check an instance yourself with:
@@ -348,11 +350,11 @@ $ h --instances
 curl -s 'https://4get.ca/api/v1/web?s=nix+flakes&scraper=yandex' | head -c 300
 ```
 
-helper reports `rate-limited` and moves on rather than pretending there are no
+jerrito reports `rate-limited` and moves on rather than pretending there are no
 results.
 
 For a backend that never depends on someone else's uptime, run your own SearXNG
-and point helper at it — it is tried right after 4get, and both the JSON API and
+and point jerrito at it — it is tried right after 4get, and both the JSON API and
 the HTML page are understood:
 
 ```nix
@@ -369,7 +371,7 @@ services.searx = {
 ```
 
 ```bash
-export HELPER_SEARX_URL=http://127.0.0.1:8888   # or "searx": "…" in config.json
+export JERRITO_SEARX_URL=http://127.0.0.1:8888   # or "searx": "…" in config.json
 ```
 
 **read** is sandboxed to the git root (`git rev-parse --show-toplevel`, or cwd).
@@ -377,7 +379,7 @@ export HELPER_SEARX_URL=http://127.0.0.1:8888   # or "searx": "…" in config.js
 return a listing with file sizes, files come back line-numbered with an
 `offset=` continuation hint when truncated.
 
-**Context budget.** History over `HELPER_MAX_CHARS` drops whole old turns; if a
+**Context budget.** History over `JERRITO_MAX_CHARS` drops whole old turns; if a
 single turn is still too large (several fetched pages), the oldest tool results
 are dropped whole before the newest one is truncated — a half page invites
 invention, an empty one at least makes the model say so.
@@ -399,35 +401,35 @@ fetch / dir-listing tests end to end:
 - **Qwen2.5-1.5B-Instruct Q4_K_M** — good at web_search/web_fetch, flaky at
   file questions (sometimes answers from memory instead of calling read).
 - **A Qwen3.5-4B "thinking" fine-tune** — spends its whole token budget
-  thinking unless `HELPER_MAX_TOKENS` is ~1500+, and ignores tools; this is the
+  thinking unless `JERRITO_MAX_TOKENS` is ~1500+, and ignores tools; this is the
   kind of file the auto-picker deliberately skips.
 
 Rough context math: MiniCPM's chat template renders the three tool definitions
 inline, so system + tools costs ~7k tokens before the question; a 16k server
 context leaves room for a page of fetched text. Other models are far cheaper.
-If a prompt does overflow, helper halves the history budget and retries once.
+If a prompt does overflow, jerrito halves the history budget and retries once.
 
 ## Tests
 
 ```bash
 nix develop -c ./test/run.sh   # everything, ~5 min (incl. a 1.5 GB download)
 SKIP_DOWNLOAD=1 ./test/run.sh  # ~60 s, no download (inside the dev shell)
-HELPER_TEST_MODEL=/path/x.gguf ./test/run.sh
+JERRITO_TEST_MODEL=/path/x.gguf ./test/run.sh
 ```
 
 The suites need `llama-server` on PATH; outside Nix use
-`HELPER_BIN_DIR=/path/to/bin ./test/run.sh` or point at your own server.
+`JERRITO_BIN_DIR=/path/to/bin ./test/run.sh` or point at your own server.
 
 | suite | covers |
 | --- | --- |
-| `helper-tests` | tool output shapes, error/edge cases (404, DNS, path escape, device file), offline search parsing (title/redirect/entities/dedupe/rate-limit), cold start, warm reuse, `--status`/`--stop`, symlink install, REPL |
+| `jerrito-tests` | tool output shapes, error/edge cases (404, DNS, path escape, device file), offline search parsing (title/redirect/entities/dedupe/rate-limit), cold start, warm reuse, `--status`/`--stop`, symlink install, REPL |
 | `prompt-test` | the system prompt: mode detection (one-shot vs shell), freshness, not persisted, size budget, which copy is running |
 | `agent-tests` | agent loop against a scripted mock server: parallel tool calls, object arguments, malformed JSON args, unknown tool, big result under a tiny budget, empty response, tool-loop forced answer |
 | `render-test` | markdown styling unit checks, and panel collapse via a real pty (`script`) vs piped output |
 | `fetch-test` | `web_fetch` extraction on fixtures (prose vs card grid, boilerplate, index/thin notes, duplicate collapse) and SearXNG JSON / HTML / bot-check handling |
 | `instances-test` | 4get instance auto-update: finder parsing, cache TTL, explicit/off overrides, self-heal when the whole list dies, rotation cursor |
 | `provision-tests` | throwaway `$HOME`s: seeded cache, `-m <path>` remembered, real download byte-exact, cross-cwd reuse |
-| `concurrency-test` | two `helper` calls at once → exactly one server, lock released |
+| `concurrency-test` | two `j` calls at once → exactly one server, lock released |
 | `abort-test` | `SIGINT` mid-generation exits 1 with "aborted", no crash trace |
 
 Prompt invariants, the frozen-build trap and the test map are written down in
@@ -445,7 +447,7 @@ Prompt invariants, the frozen-build trap and the test map are written down in
   and sends those pages to the model. Do not point it at things you would not
   paste into a chat window.
 - **First run downloads ~1.5 GB** of GGUF weights from Hugging Face into
-  `~/.cache/helper/models/`.
+  `~/.cache/jerrito/models/`.
 - **It has no shell tool** by design: it prints commands, it does not run them.
   Still, a suggested command is just text — check it before running it.
 - **No warranty.** See [`LICENSE`](LICENSE) (MIT).

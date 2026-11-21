@@ -2,10 +2,10 @@
 # SIGINT during generation must abort cleanly, not hang or crash
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-H="$HERE/../helper.mjs"
+H="$HERE/../jerrito.mjs"
 cd "$HERE/.." || exit 1
 pass=0; fail=0
-command -v llama-server >/dev/null 2>&1 || [ -n "${HELPER_BIN_DIR:-}" ] || echo "WARN  llama-server is not on PATH: the tests that start a server will fail (use: nix develop -c ./test/run.sh)"
+command -v llama-server >/dev/null 2>&1 || [ -n "${JERRITO_BIN_DIR:-}" ] || echo "WARN  llama-server is not on PATH: the tests that start a server will fail (use: nix develop -c ./test/run.sh)"
 
 ok() { echo "PASS  $1"; pass=$((pass+1)); }
 no() { echo "FAIL  $1${2:+  <<< $2}"; fail=$((fail+1)); }

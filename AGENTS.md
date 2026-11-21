@@ -1,6 +1,9 @@
 # Notes for whoever works on this next
 
-`helper` is a single-file CLI (`helper.mjs`) plus a flake (dev shell: node +
+(renamed from `helper`/`h` to `jerrito`/`j`: file, command, dirs, env prefix;
+a stale `~/.cache/helper` is migrated on first run — see `migrateFromHelper`)
+
+`jerrito` is a single-file CLI (`jerrito.mjs`) plus a flake (dev shell: node +
 `llama-cpp-vulkan`) and an offline test suite in `test/`. Read this before
 changing the prompt, the tool loop, or how the thing is packaged.
 
@@ -9,46 +12,46 @@ changing the prompt, the tool loop, or how the thing is packaged.
 ```bash
 nix develop -c ./test/run.sh        # all suites (needs the dev shell for llama-server)
 SKIP_DOWNLOAD=1 ./test/run.sh       # skip the 1.5 GB model-download suite
-nix develop -c h "question"         # dev shell wrapper always runs the live file
-h --status                          # model server + which copy of helper.mjs is running
-h --instances                       # 4get search instances in use (add: refresh)
+nix develop -c j "question"         # dev shell wrapper always runs the live file
+j --status                          # model server + which copy of jerrito.mjs is running
+j --instances                       # 4get search instances in use (add: refresh)
 ```
 
 ## Packaging — flake outputs
 
 | output | for |
 | --- | --- |
-| `packages.<system>.default` | `h` with GPU offload (Vulkan on Linux, Metal on macOS) |
-| `packages.<system>.cpu` | `h` with the CPU-only llama.cpp |
+| `packages.<system>.default` | `j` with GPU offload (Vulkan on Linux, Metal on macOS) |
+| `packages.<system>.cpu` | `j` with the CPU-only llama.cpp |
 | `apps.<system>.default` | `nix run . -- "question"` |
-| `overlays.default` | `pkgs.h` / `pkgs.h-cpu`, built against the consumer's nixpkgs |
-| `nixosModules.default` | `programs.helper.{enable,gpu,package}` |
-| `devShells.<system>.default` | node + llama.cpp + an `h` wrapper in `.direnv/bin` |
+| `overlays.default` | `pkgs.j` / `pkgs.j-cpu`, built against the consumer's nixpkgs |
+| `nixosModules.default` | `programs.jerrito.{enable,gpu,package}` |
+| `devShells.<system>.default` | node + llama.cpp + a `j` wrapper in `.direnv/bin` |
 
 Rules that keep this honest:
 
-- The wrapper **must** export `HELPER_PROG=h`: the packaged binary is a shell
-  script that runs `node .../helper.mjs`, so node cannot see the name it was
-  invoked as. Without it, usage and errors say `helper.mjs`.
-- The module applies `overlays.default` itself, so `pkgs.h` comes from the
+- The wrapper **must** export `JERRITO_PROG=h`: the packaged binary is a shell
+  script that runs `node .../jerrito.mjs`, so node cannot see the name it was
+  invoked as. Without it, usage and errors say `jerrito.mjs`.
+- The module applies `overlays.default` itself, so `pkgs.j` comes from the
   consumer's pinned nixpkgs instead of dragging a second nixpkgs in.
 - `hardware.graphics.enable` is set with `mkDefault` — a headless host must be
-  able to override it (or pick `pkgs.h-cpu`).
+  able to override it (or pick `pkgs.j-cpu`).
 - After touching the flake: `nix flake check`, then evaluate the module in a
-  throwaway `nixosSystem` and assert `programs.helper.enable = true` puts `h`
+  throwaway `nixosSystem` and assert `programs.jerrito.enable = true` puts `h`
   in `environment.systemPackages` (that is the only way to catch a broken
-  `pkgs.h` reference — it fails at eval, not at build).
+  `pkgs.j` reference — it fails at eval, not at build).
 
 ## Repo hygiene (git)
 
-Tracked: `helper.mjs`, `README.md`, `AGENTS.md`, `LICENSE`, `flake.nix`,
+Tracked: `jerrito.mjs`, `README.md`, `AGENTS.md`, `LICENSE`, `flake.nix`,
 `flake.lock`, `.envrc`, `.gitignore`, `.gitattributes`, `test/*.sh`.
 
 - `flake.lock` **is the pin**. It floats on `nixos-unstable`; only move it on
   purpose (`nix flake update`), in its own commit, with the test suite green.
 - Not tracked, and should not be: `.direnv/` (generated shell), `.pi/` (agent
   scratch), `result` (build output), `*.gguf`/`*.part` (1.5 GB of weights, they
-  live in `~/.cache/helper/models/`).
+  live in `~/.cache/jerrito/models/`).
 - Nothing in the repo may depend on this machine: no absolute paths, no
   `/nix/store` scanning, no "it works because I have X installed". Tests must
   pass from a clean `nix develop`.
@@ -58,12 +61,12 @@ Tracked: `helper.mjs`, `README.md`, `AGENTS.md`, `LICENSE`, `flake.nix`,
 ## The system prompt — invariants (this has regressed before)
 
 1. **One definition.** All prompt text lives in `systemPrompt(interactive)` in
-   `helper.mjs`. Nothing else may build, duplicate or hardcode it. Test:
+   `jerrito.mjs`. Nothing else may build, duplicate or hardcode it. Test:
    "exactly one prompt definition in the source".
 2. **Instanced once per process, from live state.** `main()` computes
    `oneShot = question.length > 0` and calls `systemPrompt(!oneShot)`; the result
    becomes `messages[0]`. It is *not* read from disk, *not* cached in
-   `~/.config/helper/config.json` or `~/.cache/helper/server.json`, and tool mode
+   `~/.config/jerrito/config.json` or `~/.cache/jerrito/server.json`, and tool mode
    (`-t`) never builds one at all.
 3. **Mode matters.**
    - one-shot (`h "q"`): "nobody will reply and there is no next turn …
@@ -78,10 +81,10 @@ Tracked: `helper.mjs`, `README.md`, `AGENTS.md`, `LICENSE`, `flake.nix`,
    user, and the model then reasons about the wrong day), the project root (git
    toplevel or cwd) and the top-level listing of that root.
 5. **The command name comes from the invocation**, not from a constant:
-   `PROG = HELPER_PROG || basename(argv[1])` — usage, errors, the REPL banner and
-   the one-shot hint say `h` when installed, `helper` when run as
-   `node helper.mjs`. The wrappers (flake package + dev shell) export
-   `HELPER_PROG=h`. The prompt still says `You are "helper"`: that is the
+   `PROG = JERRITO_PROG || basename(argv[1])` — usage, errors, the REPL banner and
+   the one-shot hint say `j` when installed, `jerrito` when run as
+   `node jerrito.mjs`. The wrappers (flake package + dev shell) export
+   `JERRITO_PROG=h`. The prompt still says `You are "jerrito"`: that is the
    project, not the command.
 6. **Keep it small.** The prompt is paid for on every request in a small
    context; it is ~1.5 k chars today and `test/prompt-test.sh` fails above 2000.
@@ -92,18 +95,18 @@ non-persistence and the one-shot hint).
 
 ## Stale builds: the "auto-loading" trap
 
-`helper.mjs` is packaged by the flake as `pkgs.writeShellApplication`, which
+`jerrito.mjs` is packaged by the flake as `pkgs.writeShellApplication`, which
 **copies the file into `/nix/store` at build time**. Consequences:
 
 | how you run it | which prompt you get |
 | --- | --- |
-| `nix develop` → `h` (shellHook wrapper) | the live working-tree file |
+| `nix develop` → `j` (shellHook wrapper) | the live working-tree file |
 | `nix run .` | rebuilt from the working tree each time |
 | `nix build` / `nix profile install .` | **frozen** copy — never updates until you re-run it |
 | a REPL already running | the prompt it instanced at startup, until restarted |
 
 A real example found in the store while debugging this:
-`/nix/store/i2g6113qkg374f803xzfd36aqrk3cf5y-helper.mjs` — 1090 lines, no 4get
+`/nix/store/i2g6113qkg374f803xzfd36aqrk3cf5y-jerrito.mjs` — 1090 lines, no 4get
 support, no mode-aware prompt; running it reproduced a symptom that had already
 been fixed in the working tree.
 
@@ -127,13 +130,13 @@ markdown; that is asserted in `render-test`). Data sources:
   not), ms is wall time between first and last content delta.
 - `render.usage()` accumulates per completion (a turn can run several);
   `render.footer()` divides. Tool wall time is measured `tool()` → `toolResult()`
-  per name (search/fetch). `HELPER_STATS` still prints raw counts to stderr.
+  per name (search/fetch). `JERRITO_STATS` still prints raw counts to stderr.
 
 ## Bugs that already bit us (don't reintroduce)
 
 - **UTC date in the prompt** → wrong day for the user (fixed: local date).
 - **Busy server judged dead** → `/health` does not answer during generation on a
-  single-slot server; helper used to spawn a duplicate and could kill a live
+  single-slot server; jerrito used to spawn a duplicate and could kill a live
   answer. Liveness is now `pid is alive`, `/health` is a hint.
 - **Context overflow** → the template's tool block costs ~7k tokens; the server
   context default is 16k and a 400 `exceed_context_size` halves the history
@@ -149,7 +152,7 @@ markdown; that is asserted in `render-test`). Data sources:
 - **Tool calls printed as text** → a small model sometimes writes the call as
   prose instead of using `tool_calls`: `<function name="read"><param
   name="path">x</param></function>`, `<function=read>{"path":"x"}</function>`,
-  or a bare `{"name":"read","arguments":{...}}`. helper printed that markup as
+  or a bare `{"name":"read","arguments":{...}}`. jerrito printed that markup as
   the answer. `parseTextCall()` now turns those into real calls, and the
   streamed answer holds its first characters back until it can tell prose from
   markup (flush as soon as it is not `<`/`{`, or after 700 chars).
@@ -177,8 +180,8 @@ finds; `prompt-test` asserts that wording exists.
 
 `web_search` tries, in order: **4get** (JSON API, scrapes from its own IP —
 bypasses our rate limiting; instance list auto-updates from the project's
-`INSTANCES` array and is cached in `~/.cache/helper/4get-instances.json`) →
-**SearXNG** if `HELPER_SEARX_URL` is set → DDG lite → DDG html → Brave.
+`INSTANCES` array and is cached in `~/.cache/jerrito/4get-instances.json`) →
+**SearXNG** if `JERRITO_SEARX_URL` is set → DDG lite → DDG html → Brave.
 Anti-bot pages and 429s are reported as `rate-limited`, never as "no results".
 Public SearXNG/4get instances are often behind Anubis proof-of-work walls.
 
@@ -191,7 +194,7 @@ returning navigation as content.
 
 | suite | covers |
 | --- | --- |
-| `helper-tests` | tool shapes, error paths, offline search parsing, cold/warm start, `--status`/`--stop`, symlink install, REPL |
+| `jerrito-tests` | tool shapes, error paths, offline search parsing, cold/warm start, `--status`/`--stop`, symlink install, REPL |
 | `prompt-test` | the prompt: modes, freshness, non-persistence, size, source identity |
 | `agent-tests` | tool loop vs a scripted server: parallel calls, bad args, unknown tool, budget-forced answer, empty response |
 | `render-test` | markdown styling + panel collapse through a real pty (`script`) |

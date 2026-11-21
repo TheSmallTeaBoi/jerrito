@@ -2,7 +2,7 @@
 # 4get instance auto-update: finder parsing, cache TTL, self-healing (all offline)
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-H="$HERE/../helper.mjs"
+H="$HERE/../jerrito.mjs"
 cd "$HERE/.." || exit 1
 FAKE=/tmp/fakehome-4get
 FINDER='https://finder.example/config.php'
@@ -11,10 +11,10 @@ ok() { echo "PASS  $1"; pass=$((pass+1)); }
 no() { echo "FAIL  $1${2:+  <<< $2}"; fail=$((fail+1)); }
 has() { local n="$1" s="$2" o="$3"; case "$o" in *"$s"*) ok "$n";; *) no "$n" "expected '$s' in: $(printf '%s' "$o" | tail -c 200)";; esac; }
 hasnt() { local n="$1" s="$2" o="$3"; case "$o" in *"$s"*) no "$n" "unexpected '$s'";; *) ok "$n";; esac; }
-cache_field() { HOME="$FAKE" node -e 'try{const j=require(process.env.HOME+"/.cache/helper/4get-instances.json");console.log(j'"$1"')}catch{console.log("")}'; }
+cache_field() { HOME="$FAKE" node -e 'try{const j=require(process.env.HOME+"/.cache/jerrito/4get-instances.json");console.log(j'"$1"')}catch{console.log("")}'; }
 
 cat > /tmp/fourget-instance-test.mjs <<'EOF'
-const { webSearch } = await import(process.env.HELPER_FILE);
+const { webSearch } = await import(process.env.JERRITO_FILE);
 const mode = process.env.G4_MODE;
 const hits = [];
 const json = (o) => new Response(JSON.stringify(o), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -51,7 +51,7 @@ console.log('FINDER_CALLS=' + finderCalls);
 console.log('HOSTS=' + [...new Set(hits.map((h) => h.replace(/^https?:\/\//, '').split('/')[0]))].join(','));
 EOF
 
-run() { HOME="$FAKE" HELPER_4GET_FINDER="$FINDER" HELPER_FILE="$H" node /tmp/fourget-instance-test.mjs 2>&1; }
+run() { HOME="$FAKE" JERRITO_4GET_FINDER="$FINDER" JERRITO_FILE="$H" node /tmp/fourget-instance-test.mjs 2>&1; }
 reset() { rm -rf "$FAKE"; mkdir -p "$FAKE"; }
 
 echo "== instance finder + cache =="
@@ -71,7 +71,7 @@ has "instances: JSON finder payload accepted" "From live" "$out"
 
 echo
 echo "== staleness and outages =="
-HOME="$FAKE" node -e 'const fs=require("fs");const f=process.env.HOME+"/.cache/helper/4get-instances.json";const j=JSON.parse(fs.readFileSync(f));j.at=0;fs.writeFileSync(f,JSON.stringify(j))'
+HOME="$FAKE" node -e 'const fs=require("fs");const f=process.env.HOME+"/.cache/jerrito/4get-instances.json";const j=JSON.parse(fs.readFileSync(f));j.at=0;fs.writeFileSync(f,JSON.stringify(j))'
 out=$(G4_MODE=ok run)
 has "instances: stale cache refreshed" "FINDER_CALLS=1" "$out"
 
@@ -86,12 +86,12 @@ has "instances: no cache + dead finder uses built-ins" "4get.ca" "$out"
 echo
 echo "== explicit config and self-healing =="
 reset
-out=$(HOME="$FAKE" HELPER_4GET_URL=https://live.example HELPER_4GET_FINDER="$FINDER" G4_MODE=ok HELPER_FILE="$H" node /tmp/fourget-instance-test.mjs 2>&1)
-has "instances: explicit HELPER_4GET_URL is used" "From live" "$out"
+out=$(HOME="$FAKE" JERRITO_4GET_URL=https://live.example JERRITO_4GET_FINDER="$FINDER" G4_MODE=ok JERRITO_FILE="$H" node /tmp/fourget-instance-test.mjs 2>&1)
+has "instances: explicit JERRITO_4GET_URL is used" "From live" "$out"
 has "instances: explicit list skips the finder" "FINDER_CALLS=0" "$out"
 
 reset
-out=$(HOME="$FAKE" HELPER_4GET_FINDER=off G4_MODE=ok HELPER_FILE="$H" node /tmp/fourget-instance-test.mjs 2>&1)
+out=$(HOME="$FAKE" JERRITO_4GET_FINDER=off G4_MODE=ok JERRITO_FILE="$H" node /tmp/fourget-instance-test.mjs 2>&1)
 has "instances: finder can be turned off" "FINDER_CALLS=0" "$out"
 has "instances: falls back to built-ins when off" "4get.ca" "$out"
 

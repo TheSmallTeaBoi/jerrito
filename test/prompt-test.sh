@@ -3,7 +3,7 @@
 # stale copy, never persisted. Offline (a stub server records what it receives).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-H="$HERE/../helper.mjs"
+H="$HERE/../jerrito.mjs"
 cd "$HERE/.." || exit 1
 MP=$(node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{const p=s.address().port;console.log(p);s.close()})')
 export MOCK_PORT=$MP
@@ -44,7 +44,7 @@ node /tmp/mock-prompt.mjs & MOCK=$!
 trap 'kill $MOCK 2>/dev/null' EXIT
 for i in $(seq 1 50); do curl -sf "${BASE%/v1}/models" >/dev/null 2>&1 && break; sleep 0.2; done
 
-run1() { timeout 30 env HELPER_BASE_URL="$BASE" node "$H" "$1" 2>&1; }
+run1() { timeout 30 env JERRITO_BASE_URL="$BASE" node "$H" "$1" 2>&1; }
 last() { node -e 'const l=require("fs").readFileSync(process.env.LOG,"utf8").trim().split("\n");const j=JSON.parse(l[l.length-1]);console.log(j[process.argv[1]])' "$1"; }
 
 echo "== one-shot mode (auto-detected: a question argument) =="
@@ -57,7 +57,7 @@ has   "prompt forbids asking back" "never ask a question" "$sys"
 has   "prompt forbids offering more" "never offer to do more" "$sys"
 has   "prompt is dated today" "$(date +%F)" "$sys"
 has   "prompt names the project root (cwd)" "$PWD" "$sys"
-has   "prompt lists the top level of that root" "helper.mjs" "$sys"
+has   "prompt lists the top level of that root" "jerrito.mjs" "$sys"
 has   "prompt names read" "read only the lines" "$sys"
 has   "prompt names grep" "grep first" "$sys"
 has   "prompt names web_search" "web_search" "$sys"
@@ -75,7 +75,7 @@ size=${#sys}
 echo
 echo "== interactive mode (auto-detected: no question argument) =="
 rm -f "$LOG"
-printf 'plain question\n/exit\n' | timeout 30 env HELPER_BASE_URL="$BASE" node "$H" >/dev/null 2>&1
+printf 'plain question\n/exit\n' | timeout 30 env JERRITO_BASE_URL="$BASE" node "$H" >/dev/null 2>&1
 sys=$(LOG="$LOG" last sys)
 has   "repl prompt says the user can reply" "interactive shell" "$sys"
 has   "repl prompt mentions earlier turns" "earlier turns are above" "$sys"
@@ -86,18 +86,18 @@ echo "== instanced per invocation, from current state =="
 other=/tmp/prompt-project
 rm -rf "$other"; mkdir -p "$other"; touch "$other/marker.txt"
 rm -f "$LOG"
-( cd "$other" && timeout 30 env HELPER_BASE_URL="$BASE" node "$H" "plain question" >/dev/null 2>&1 )
+( cd "$other" && timeout 30 env JERRITO_BASE_URL="$BASE" node "$H" "plain question" >/dev/null 2>&1 )
 sys=$(LOG="$LOG" last sys)
 has   "prompt picks up the new cwd as root" "$other" "$sys"
 has   "prompt lists that directory" "marker.txt" "$sys"
-hasnt "prompt does not leak the previous root" "$PWD/helper.mjs" "$sys"
+hasnt "prompt does not leak the previous root" "$PWD/jerrito.mjs" "$sys"
 rm -rf "$other"
 
 echo
 echo "== one prompt definition, nothing persisted, none in tool mode =="
-n=$(grep -c 'You are "helper"' "$H")
+n=$(grep -c 'You are "jerrito"' "$H")
 [ "$n" = 1 ] && ok "exactly one prompt definition in the source" || no "one prompt definition" "found $n"
-for f in "$HOME/.config/helper/config.json" "$HOME/.cache/helper/server.json"; do
+for f in "$HOME/.config/jerrito/config.json" "$HOME/.cache/jerrito/server.json"; do
   if [ -f "$f" ] && grep -q 'You are' "$f"; then no "no prompt text in $(basename "$f")"; else ok "no prompt text in $(basename "$f")"; fi
 done
 rm -f "$LOG"
@@ -106,14 +106,14 @@ timeout 30 node "$H" -t read . >/dev/null 2>&1
 
 echo
 echo "== the running copy identifies itself (stale-build trap) =="
-H_REAL="$(cd "$HERE/.." && pwd)/helper.mjs"
+H_REAL="$(cd "$HERE/.." && pwd)/jerrito.mjs"
 out=$(node "$H" --status 2>&1)
 has "live tree: --status prints its own source" "source  $H_REAL" "$out"
 hasnt "live tree: not marked frozen" "frozen build" "$out"
-cp "$H" /tmp/helper-copy.mjs
-out=$(node /tmp/helper-copy.mjs --status 2>&1)
-has "a copy reports its own path, not the original" "source  /tmp/helper-copy.mjs" "$out"
-rm -f /tmp/helper-copy.mjs
+cp "$H" /tmp/jerrito-copy.mjs
+out=$(node /tmp/jerrito-copy.mjs --status 2>&1)
+has "a copy reports its own path, not the original" "source  /tmp/jerrito-copy.mjs" "$out"
+rm -f /tmp/jerrito-copy.mjs
 
 echo
 echo "== one-shot hint when the model asks back =="

@@ -2,7 +2,7 @@
 # web_fetch extraction + search providers, entirely offline (fixtures + stubbed fetch)
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-H="$HERE/../helper.mjs"
+H="$HERE/../jerrito.mjs"
 cd "$HERE/.." || exit 1
 pass=0; fail=0
 ok() { echo "PASS  $1"; pass=$((pass+1)); }
@@ -12,7 +12,7 @@ hasnt() { local n="$1" s="$2" o="$3"; case "$o" in *"$s"*) no "$n" "unexpected '
 
 echo "== web_fetch extraction (offline fixtures) =="
 cat > /tmp/fetch-fixtures.mjs <<'EOF'
-const { htmlToMarkdown } = await import(process.env.HELPER_FILE);
+const { htmlToMarkdown } = await import(process.env.JERRITO_FILE);
 let fail = 0;
 const ok = (n, c, extra = '') => { if (c) console.log('PASS  ' + n); else { console.log('FAIL  ' + n + (extra ? '  <<< ' + extra : '')); fail++; } };
 
@@ -57,14 +57,14 @@ const dupes = `<html><body><article>
 ok('repeated lines collapsed', (htmlToMarkdown(dupes, 'https://x.test/').text.match(/Identical line/g) || []).length === 1);
 process.exit(fail ? 1 : 0);
 EOF
-out=$(HELPER_FILE="$H" node /tmp/fetch-fixtures.mjs 2>&1); echo "$out"
+out=$(JERRITO_FILE="$H" node /tmp/fetch-fixtures.mjs 2>&1); echo "$out"
 pass=$((pass + $(printf '%s\n' "$out" | grep -c '^PASS')))
 fail=$((fail + $(printf '%s\n' "$out" | grep -c '^FAIL')))
 
 echo
 echo "== web_fetch end-to-end messaging (stubbed network) =="
 cat > /tmp/fetch-notes.mjs <<'EOF'
-const { webFetch } = await import(process.env.HELPER_FILE);
+const { webFetch } = await import(process.env.JERRITO_FILE);
 const real = globalThis.fetch;
 const pages = {
   'https://news.example/': '<html><head><title>News</title></head><body><main>' +
@@ -85,14 +85,14 @@ const missing = await webFetch('https://gone.example/');
 console.log(missing.includes('HTTP 404') ? 'PASS  404 still reported' : 'FAIL  404 still reported <<< ' + missing);
 globalThis.fetch = real;
 EOF
-out=$(HELPER_FILE="$H" node /tmp/fetch-notes.mjs 2>&1); echo "$out"
+out=$(JERRITO_FILE="$H" node /tmp/fetch-notes.mjs 2>&1); echo "$out"
 pass=$((pass + $(printf '%s\n' "$out" | grep -c '^PASS')))
 fail=$((fail + $(printf '%s\n' "$out" | grep -c '^FAIL')))
 
 echo
 echo "== searxng provider (offline: JSON, HTML fallback, bot check) =="
 cat > /tmp/searx-test.mjs <<'EOF'
-const { webSearch } = await import(process.env.HELPER_FILE);
+const { webSearch } = await import(process.env.JERRITO_FILE);
 const real = globalThis.fetch;
 const json = {
   results: [
@@ -118,30 +118,30 @@ globalThis.fetch = async (url) => {
 console.log(await webSearch('nix flakes'));
 EOF
 
-export HELPER_SEARX_URL='http://searx.example'
-export HELPER_4GET_URL=off
-out=$(SX_MODE=json HELPER_FILE="$H" node /tmp/searx-test.mjs 2>&1)
+export JERRITO_SEARX_URL='http://searx.example'
+export JERRITO_4GET_URL=off
+out=$(SX_MODE=json JERRITO_FILE="$H" node /tmp/searx-test.mjs 2>&1)
 has "searx: JSON results parsed" "1) Nix flakes" "$out"
 has "searx: url and description" "https://nix.dev/flakes" "$out"
 has "searx: whitespace in content collapsed" "Flakes pin inputs." "$out"
 hasnt "searx: duplicate url removed" "same url again" "$out"
 
-out=$(SX_MODE=html HELPER_FILE="$H" node /tmp/searx-test.mjs 2>&1)
+out=$(SX_MODE=html JERRITO_FILE="$H" node /tmp/searx-test.mjs 2>&1)
 has "searx: HTML fallback parsed" "1) A result" "$out"
 has "searx: HTML description" "Second description." "$out"
 
-out=$(SX_MODE=bot HELPER_FILE="$H" node /tmp/searx-test.mjs 2>&1)
+out=$(SX_MODE=bot JERRITO_FILE="$H" node /tmp/searx-test.mjs 2>&1)
 has "searx: bot check reported honestly" "blocked by the instance's bot check" "$out"
 
-unset HELPER_SEARX_URL
-out=$(HELPER_FILE="$H" node -e 'const { webSearch } = await import(process.env.HELPER_FILE); const save = globalThis.fetch; globalThis.fetch = async () => { throw new Error("offline"); }; console.log(await webSearch("x"));')
+unset JERRITO_SEARX_URL
+out=$(JERRITO_FILE="$H" node -e 'const { webSearch } = await import(process.env.JERRITO_FILE); const save = globalThis.fetch; globalThis.fetch = async () => { throw new Error("offline"); }; console.log(await webSearch("x"));')
 hasnt "searx: not used when unset" "searxng:" "$out"
 
 echo
-unset HELPER_4GET_URL
+unset JERRITO_4GET_URL
 echo "== 4get provider (offline: JSON, scraper fallback, dead instance) =="
 cat > /tmp/4get-test.mjs <<'EOF'
-const { webSearch } = await import(process.env.HELPER_FILE);
+const { webSearch } = await import(process.env.JERRITO_FILE);
 const mode = process.env.G4_MODE;
 const hits = [];
 const json = (o) => new Response(JSON.stringify(o), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -169,24 +169,24 @@ console.log(await webSearch('nix'));
 console.log('HITS=' + hits.map((h) => h.replace(/^https?:\/\//, '').split('/')[0]).join(','));
 EOF
 
-out=$(HOME=/tmp/fakehome-4get-fetch HELPER_4GET_FINDER=off G4_MODE=ok HELPER_FILE="$H" node /tmp/4get-test.mjs 2>&1)
+out=$(HOME=/tmp/fakehome-4get-fetch JERRITO_4GET_FINDER=off G4_MODE=ok JERRITO_FILE="$H" node /tmp/4get-test.mjs 2>&1)
 has "4get: JSON results parsed" "1) Four result" "$out"
 has "4get: description whitespace collapsed" "from 4get" "$out"
 hasnt "4get: duplicate url removed" "Duplicate" "$out"
 has "4get: first reachable instance used" "HITS=4get.ca" "$out"
 
-out=$(HOME=/tmp/fakehome-4get-fetch HELPER_4GET_FINDER=off G4_MODE=scraper HELPER_FILE="$H" node /tmp/4get-test.mjs 2>&1)
+out=$(HOME=/tmp/fakehome-4get-fetch JERRITO_4GET_FINDER=off G4_MODE=scraper JERRITO_FILE="$H" node /tmp/4get-test.mjs 2>&1)
 has "4get: retries another scraper after an upstream block" "Brave via 4get" "$out"
 
-out=$(HOME=/tmp/fakehome-4get-fetch HELPER_4GET_FINDER=off G4_MODE=down HELPER_FILE="$H" node /tmp/4get-test.mjs 2>&1)
+out=$(HOME=/tmp/fakehome-4get-fetch JERRITO_4GET_FINDER=off G4_MODE=down JERRITO_FILE="$H" node /tmp/4get-test.mjs 2>&1)
 has "4get: 503 falls back to duckduckgo" "DDG result" "$out"
 has "4get: fallback visible in hits" "duckduckgo" "$out"
 
-out=$(HOME=/tmp/fakehome-4get-fetch HELPER_4GET_FINDER=off G4_MODE=bot HELPER_FILE="$H" node /tmp/4get-test.mjs 2>&1)
+out=$(HOME=/tmp/fakehome-4get-fetch JERRITO_4GET_FINDER=off G4_MODE=bot JERRITO_FILE="$H" node /tmp/4get-test.mjs 2>&1)
 has "4get: bot-walled instance falls back" "DDG result" "$out"
 
-out=$(HOME=/tmp/fakehome-4get-fetch HELPER_4GET_FINDER=off HELPER_4GET_URL=off G4_MODE=ok HELPER_FILE="$H" node /tmp/4get-test.mjs 2>&1)
-hasnt "4get: HELPER_4GET_URL=off disables it" "4get.ca" "$out"
+out=$(HOME=/tmp/fakehome-4get-fetch JERRITO_4GET_FINDER=off JERRITO_4GET_URL=off G4_MODE=ok JERRITO_FILE="$H" node /tmp/4get-test.mjs 2>&1)
+hasnt "4get: JERRITO_4GET_URL=off disables it" "4get.ca" "$out"
 has "4get: off still searches duckduckgo" "DDG result" "$out"
 echo
 echo "== summary: $pass passed, $fail failed =="
