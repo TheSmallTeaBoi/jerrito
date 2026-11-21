@@ -141,6 +141,21 @@ build, or a session started before the fix.
 - **Markdown** → `**bold *italic* x**` printed raw markers; `\u0001` code
   placeholders leaked inside bold spans.
 
+## Tools (four, on purpose)
+
+| tool | shape / limits |
+| --- | --- |
+| `grep` | regex (with `|`) over project files, optional `path` + `glob`; own walker (`walkFiles`), skips `SKIP` dirs, ignores binaries and >1.5 MB files, 60 matches, invalid regex falls back to literal |
+| `read` | one file with `offset`/`limit` (default 250 lines) or a directory listing; sandboxed to `ROOT` |
+| `web_search` | provider chain, see below |
+| `web_fetch` | readable text from a URL, see below |
+
+No shell tool, by design: a 2 B model must not be able to run anything, and the
+schema is part of the prompt budget. Adding a fifth tool costs routing accuracy —
+prefer extending an existing one (`grep` carries `path`/`glob` rather than being
+two tools). The prompt tells the model to grep first and read only the lines it
+finds; `prompt-test` asserts that wording exists.
+
 ## Search topology
 
 `web_search` tries, in order: **4get** (JSON API, scrapes from its own IP —

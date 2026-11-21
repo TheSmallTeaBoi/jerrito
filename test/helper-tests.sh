@@ -79,6 +79,35 @@ out=$(HELPER_READ_LINES=4 node "$H" -t read helper.mjs 2>&1); has "read truncati
 out=$(node "$H" -t read ../../etc/passwd 2>&1); c=$?
 [ "$c" = 1 ] && has "read blocks path escape" "escapes project root" "$out" || no "read escape exit code" "got $c"
 out=$(node "$H" -t read /dev/zero 2>&1); has "read blocks device files" "escapes project root" "$out"
+# grep: search, do not read whole files
+out=$(node "$H" -t grep "web_search|web_fetch" 2>&1)
+has "grep: | alternation matches" 'for "web_search|web_fetch"' "$out"
+has "grep: returns path:line: text" "helper.mjs:" "$out"
+out=$(node "$H" -t grep "nixpkgs" README.md 2>&1)
+has "grep: path scopes the search" "under README.md" "$out"
+out=$(node "$H" -t grep "enable" . "*.sh" 2>&1)
+case "$out" in *.md:*) no "grep: glob restricts to matching files";; *) ok "grep: glob restricts to matching files";; esac
+absent="zz$(date +%s%N)qq"
+out=$(node "$H" -t grep "$absent" 2>&1)
+has "grep: says so when nothing matches" "no match for" "$out"
+out=$(node "$H" -t grep "(" "(" 2>&1)
+[ -n "$out" ] && ok "grep: invalid regex falls back to text" || no "grep: invalid regex falls back to text"
+out=$(node "$H" -t grep 2>&1); has "grep: missing pattern is reported" "needs a" "$out"
+out=$(node "$H" -t grep x ../../etc 2>&1); c=$?
+has "grep: cannot escape the project root" "escapes project root" "$out"
+
+# junk directories must never be searched (and cannot be reached by walking up)
+probe=/tmp/grep-proj
+rm -rf "$probe"; mkdir -p "$probe/src" "$probe/node_modules/x" "$probe/.git"
+printf "needle here\n" > "$probe/src/a.txt"
+printf "needle in junk\n" > "$probe/node_modules/x/b.js"
+printf "needle in git\n" > "$probe/.git/config"
+out=$(cd "$probe" && node "$H" -t grep needle 2>&1)
+has "grep: finds files in the tree" "src/a.txt:1:" "$out"
+case "$out" in *node_modules*|*.git*) no "grep: skips node_modules and .git";; *) ok "grep: skips node_modules and .git";; esac
+case "$out" in *"1 file"*) ok "grep: only the real hit counted";; *) no "grep: only the real hit counted" "$out";; esac
+rm -rf "$probe"
+
 out=$(node "$H" -t nonsense x 2>&1); has "unknown tool is reported" "Unknown tool" "$out"
 out=$(node "$H" -t web_search 2>&1); has "tool without arg is reported" "needs a" "$out"
 out=$(node "$H" --help 2>&1); has "--help lists usage" "usage:" "$out"

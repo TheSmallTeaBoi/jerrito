@@ -601,7 +601,85 @@ function resolveIn(rel) {
   return abs;
 }
 
-const SKIP = new Set(['.git', 'node_modules', 'target', '.direnv', 'result', '__pycache__', '.venv', 'dist', 'build']);
+const SKIP = new Set(['.git', 'node_modules', 'target', '.direnv', 'result', '__pycache__', '.venv', 'dist', 'build', '.pi', '.cache', 'vendor', 'coverage', '.next']);
+
+/** files under `abs`, depth-first, skipping the usual junk dirs */
+function* walkFiles(abs, max = 5000) {
+  const st = statSync(abs);
+  if (st.isFile()) { yield abs; return; }
+  const stack = [abs];
+  let n = 0;
+  while (stack.length && n < max) {
+    const dir = stack.pop();
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (SKIP.has(e.name)) continue;
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) stack.push(p);
+      else if (e.isFile()) { n++; yield p; if (n >= max) return; }
+    }
+  }
+}
+
+/** a filename glob ("*.nix", "docs/**\u002F*.md") -> RegExp, matched against the rel path */
+function globToRe(glob) {
+  if (!glob) return null;
+  const raw = String(glob).trim().replace(/^\.\//, '');
+  if (!raw) return null;
+  let src = '';
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (c === '*' && raw[i + 1] === '*') { src += '.*'; i++; if (raw[i + 1] === '/') i++; }
+    else if (c === '*') src += '[^/]*';
+    else if (c === '?') src += '[^/]';
+    else src += /[.+^${}()|[\]\\]/.test(c) ? '\\' + c : c;
+  }
+  return new RegExp('^' + src + '$', 'i');
+}
+
+/** `path:line: text`, ripgrep-shaped, capped short so a small model can act on it */
+function grepTool(pattern, relPath, glob) {
+  const pat = String(pattern ?? '').trim();
+  if (!pat) return 'grep needs a "pattern" argument.';
+  let re = null;
+  try { re = new RegExp(pat, 'i'); } catch { re = null; }   // bad regex: fall back to text
+  const hit = re ? (s) => re.test(s) : (s) => s.toLowerCase().includes(pat.toLowerCase());
+
+  const start = resolveIn(relPath || '.');
+  const g = globToRe(glob);
+  const globOnBasename = Boolean(glob) && !String(glob).includes('/');
+  const MAX = 60;
+  const out = [];
+  let searched = 0, filesHit = 0, cut = false;
+
+  for (const file of walkFiles(start)) {
+    const rel = path.relative(ROOT, file) || file;
+    if (g && !g.test(rel) && !(globOnBasename && g.test(path.basename(file)))) continue;
+    let buf;
+    try {
+      if (statSync(file).size > 1_500_000) continue;
+      buf = readFileSync(file);
+    } catch { continue; }
+    if (buf.subarray(0, 4096).includes(0)) continue;        // binary
+    searched++;
+    let any = false;
+    const all = buf.toString('utf8').split('\n');
+    for (let i = 0; i < all.length; i++) {
+      const line = all[i];
+      if (line.length > 300 || !hit(line)) continue;
+      any = true;
+      if (out.length < MAX) out.push(`${rel}:${i + 1}: ${clip(line.trim(), 160)}`);
+      else { cut = true; break; }
+    }
+    if (any) filesHit++;
+    if (cut) break;
+  }
+
+  const where = `${glob ? glob + ' ' : ''}under ${path.relative(ROOT, start) || '.'}`;
+  if (!out.length) return `no match for ${JSON.stringify(pat)} ${where} (${searched} files searched)`;
+  return `${out.length}${cut ? '+' : ''} match${out.length === 1 ? '' : 'es'} for ${JSON.stringify(pat)} in ${filesHit} file${filesHit === 1 ? '' : 's'} ${where}\n` + out.join('\n');
+}
 
 function readTool(rel, offset, limit) {
   const abs = resolveIn(rel);
@@ -665,6 +743,22 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'grep',
+      description: 'Search inside project files and return matching lines as path:line: text. Use this FIRST to find where something lives, then read only that range. The pattern is a regex; use | for alternatives.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'text or regex, e.g. "screens|widths"' },
+          path: { type: 'string', description: 'file or directory to search (default: project root)' },
+          glob: { type: 'string', description: 'only files matching this, e.g. "*.nix"' },
+        },
+        required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'web_search',
       description: 'Search the web. Use for public facts, docs, software versions and news. Not for files in this project. Returns titles, URLs and short descriptions.',
       parameters: {
@@ -697,7 +791,8 @@ async function runTool(name, args) {
       if (!args.url) return { text: 'web_fetch needs a "url" argument.', hint: '(no url)' };
       return { text: await webFetch(String(args.url)), hint: args.url };
     case 'read': return { text: readTool(String(args.path ?? '.'), args.offset, args.limit), hint: args.path };
-    default: return { text: `Unknown tool "${name}". Available: web_search, web_fetch, read.`, hint: name };
+    case 'grep': return { text: grepTool(args.pattern, args.path, args.glob), hint: args.pattern };
+    default: return { text: `Unknown tool "${name}". Available: read, grep, web_search, web_fetch.`, hint: name };
   }
 }
 
@@ -1266,7 +1361,8 @@ function joinFitted(items, width) {
 /** "read flake.nix" / "read README.md:250-499" / "web_search \"nix 1.0\"" */
 function describeCall(name, args = {}, compact = false) {
   if (typeof args === 'string') args = { path: args };
-  const h = String(args.query ?? args.url ?? args.path ?? '').replace(/\s+/g, ' ').trim();
+  const h = String(args.query ?? args.url ?? args.pattern ?? args.path ?? '').replace(/\s+/g, ' ').trim();
+  if (name === 'grep') return `grep ${JSON.stringify(clip(h, 40))}${args.glob ? ' ' + args.glob : ''}`;
   if (name === 'read') {
     if (!h) return 'read .';
     const off = Number(args.offset) || 1;
@@ -1376,7 +1472,7 @@ function systemPrompt(interactive) {
     `You are "helper", a terse terminal assistant on Linux. Today is ${today}. You are a small local model: keep answers short.`,
     mode,
     'Rules:',
-    '1. Never guess file contents or file names. Call read only when the question is about this project or its code.',
+    '1. Never guess file contents or file names. For this project, grep first (pattern; | for alternatives), then read only the lines it points at.',
     '2. For news, versions, prices or anything that may have changed, call web_search (then web_fetch on the best URL). Your training data is older than today.',
     '3. You cannot run shell commands. When a command is needed, print the exact command in a code block and explain it in one line.',
     '4. Say where an answer came from (file path or URL). If a tool returns nothing, say so instead of making something up.',
@@ -1384,7 +1480,8 @@ function systemPrompt(interactive) {
     '6. Stop calling tools once you have enough to answer. Two searches that did not help means: say so.',
     '7. End with the answer, not with a question or an offer to do more.',
     '8. Do not call a tool twice with the same arguments; the result is already above. For a large file read the range you need (offset/limit).',
-    'Example: "what does helper.mjs do?" -> call read({"path":"helper.mjs"}), then answer from its contents.',
+    'Example: "what does helper.mjs do?" -> read({"path":"helper.mjs"}), then answer from its contents.',
+    'Example: "where are screens configured?" -> grep({"pattern":"screens"}), then read the file:line it returns.',
     '',
     'Project root: ' + ROOT,
     top ? 'Top level: ' + top : '',
@@ -1655,7 +1752,11 @@ async function main(argv) {
   if (toolName) {
     const arg = question.join(' ');
     try {
-      const r = await runTool(toolName, toolName === 'read' ? { path: arg } : toolName === 'web_fetch' ? { url: arg } : { query: arg });
+      const args = toolName === 'read' ? { path: arg }
+        : toolName === 'web_fetch' ? { url: arg }
+        : toolName === 'grep' ? { pattern: question[0] || '', path: question[1], glob: question[2] }
+        : { query: arg };
+      const r = await runTool(toolName, args);
       console.log(r.text);
     } catch (e) {
       console.error(red(`${PROG}: `) + (e.name === 'TimeoutError' ? 'timed out' : e.message));

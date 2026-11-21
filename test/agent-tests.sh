@@ -118,7 +118,7 @@ has   "answer starting with {: printed as written" "is just a JSON object" "$out
 out=$(run "use unknown tool"); c=$?
 [ "$c" = 0 ] && ok "unknown tool: exit 0" || no "unknown tool: exit" "got $c"
 has "unknown tool: names the bad tool" "Unknown tool" "$out"
-has "unknown tool: lists real tools" "Available: web_search" "$out"
+has "unknown tool: lists real tools" "Available: read, grep, web_search, web_fetch" "$out"
 
 out=$(EXTRA="HELPER_MAX_CHARS=1200" run "big read"); c=$?
 [ "$c" = 0 ] && ok "big read + tiny budget: no hang" || no "big read + tiny budget" "exit $c (timeout?)"

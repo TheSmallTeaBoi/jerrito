@@ -58,7 +58,8 @@ has   "prompt forbids offering more" "never offer to do more" "$sys"
 has   "prompt is dated today" "$(date +%F)" "$sys"
 has   "prompt names the project root (cwd)" "$PWD" "$sys"
 has   "prompt lists the top level of that root" "helper.mjs" "$sys"
-has   "prompt names read" "read only when" "$sys"
+has   "prompt names read" "read only the lines" "$sys"
+has   "prompt names grep" "grep first" "$sys"
 has   "prompt names web_search" "web_search" "$sys"
 has   "prompt names web_fetch" "web_fetch" "$sys"
 has   "prompt forbids running commands" "cannot run shell commands" "$sys"
@@ -67,7 +68,7 @@ has   "prompt warns training data is stale" "training data is older than today" 
 has   "prompt ends with the answer rule" "End with the answer" "$sys"
 has   "prompt forbids repeat tool calls" "Do not call a tool twice with the same arguments" "$sys"
 tools=$(LOG="$LOG" last tools)
-[ "$tools" = 3 ] && ok "request carries the 3 tool schemas" || no "request carries 3 tool schemas" "got $tools"
+[ "$tools" = 4 ] && ok "request carries the 4 tool schemas" || no "request carries 4 tool schemas" "got $tools"
 size=${#sys}
 [ "$size" -lt 2000 ] && ok "prompt stays small ($size chars)" || no "prompt stays small" "$size chars"
 

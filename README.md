@@ -18,15 +18,16 @@ $ h "what is this project?"
   ⚙ read .
   ⚙ read helper.mjs
 
-helper.mjs is a single-file CLI that answers questions using three tools:
-read (local files), web_search and web_fetch. It runs a small local model...
+helper.mjs is a single-file CLI that answers questions using four tools:
+grep and read (local files), web_search and web_fetch. It runs a small local model...
 ```
 
-Three tools, no dependencies, one file. It is meant to run against a 1–4B model
+Four tools, no dependencies, one file. It is meant to run against a 1–4B model
 on a laptop CPU and still be useful: explain a repo, find the right flag, tell
 you what a command does, look something up on the web.
 
 ```
+grep         search inside project files -> path:line: text (regex, | for alternatives)
 read         read a file (or list a dir) inside the current project
 web_search   DDG lite scraper -> title / url / description only
 web_fetch    curl + HTML -> markdown ("reading mode")
@@ -261,6 +262,20 @@ Sampler overrides are only sent when set, so servers/APIs that reject extra
 fields are unaffected.
 
 ## Notes on the tools
+
+**grep** is how the model finds things instead of reading whole files. One
+pattern (regex, so `screens|widths` is an alternation), an optional `path` to
+scope it and an optional `glob` (`*.nix`) to filter filenames. Output is
+ripgrep-shaped — `path:line: text`, one line each, 160 chars max, 60 matches —
+so the next call can be `read` on exactly the range that matters. It walks with
+its own scanner (no ripgrep dependency), skips `.git`, `node_modules`, `.direnv`,
+`.pi` and friends, ignores binaries and files over 1.5 MB, and falls back to
+literal text search when the pattern is not valid regex.
+
+Before this existed, "how do I configure screens?" made the model read 250-line
+ranges of a 2000-line `docs/options.md` five times, miss, then print a tool call
+as text. Now it greps, gets `docs/options.md:1250: screens.autoLayout...` and
+reads one range.
 
 **web_search** tries **4get** first (`https://4get.ca` and a mirror by default): a search
 proxy that scrapes from *its* IP, so it keeps working when this machine's IP is
