@@ -82,6 +82,9 @@ out=$(node "$H" -t read /dev/zero 2>&1); has "read blocks device files" "escapes
 out=$(node "$H" -t nonsense x 2>&1); has "unknown tool is reported" "Unknown tool" "$out"
 out=$(node "$H" -t web_search 2>&1); has "tool without arg is reported" "needs a" "$out"
 out=$(node "$H" --help 2>&1); has "--help lists usage" "usage:" "$out"
+out=$(node "$H" --help 2>&1); has "--help names the file it was run as" 'helper "question"' "$out"
+out=$(HELPER_PROG=h node "$H" --help 2>&1); has "--help follows the installed name" 'h "question"' "$out"
+rm -rf /tmp/ht-prog-home; out=$(HOME=/tmp/ht-prog-home HELPER_PROG=h node "$H" --stop 2>&1); has "messages follow the installed name" "no h-managed server" "$out"; rm -rf /tmp/ht-prog-home
 hasnt "--help has no fabricated example" "llama-server -m model.gguf" "$out"
 
 echo

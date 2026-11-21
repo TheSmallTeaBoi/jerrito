@@ -30,31 +30,33 @@
 
           shellHook = ''
             mkdir -p .direnv/bin
-            printf '#!/bin/sh\nexec node "%s/helper.mjs" "$@"\n' "$PWD" > .direnv/bin/helper
-            chmod +x .direnv/bin/helper
+            printf '#!/bin/sh\nexport HELPER_PROG=h\nexec node "%s/helper.mjs" "$@"\n' "$PWD" > .direnv/bin/h
+            chmod +x .direnv/bin/h
+            rm -f .direnv/bin/helper
             export PATH="$PWD/.direnv/bin:$PATH"
-            echo "helper dev shell · $(node -v) · llama.cpp $(llama-server --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo ready)"
+            echo "helper dev shell · command: h · $(node -v) · llama.cpp $(llama-server --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo ready)"
           '';
         };
       });
 
-      # self-contained helper for `nix run` / `nix profile install`
+      # self-contained helper for `nix run` / `nix profile install`.
+      # the project is "helper"; the command is `h`
       packages = forAll (pkgs: {
         default = pkgs.writeShellApplication {
-          name = "helper";
+          name = "h";
           runtimeInputs = [
             pkgs.nodejs_24
             (llama pkgs)
             pkgs.git
           ];
-          text = ''exec node ${./helper.mjs} "$@"'';
+          text = ''export HELPER_PROG=h; exec node ${./helper.mjs} "$@"'';
         };
       });
 
       apps = forAll (pkgs: {
         default = {
           type = "app";
-          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/helper";
+          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/h";
         };
       });
     };

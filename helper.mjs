@@ -29,6 +29,10 @@ const COLOR = Boolean((process.stdout.isTTY && !process.env.NO_COLOR)
 const paint = (code) => (s) => (COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
 const dim = paint('2'), cyan = paint('36'), yellow = paint('33'), red = paint('31');
 
+// the command you actually typed: `h` when installed (the wrapper exports
+// HELPER_PROG), else the file name, so `node helper.mjs` still says "helper"
+const PROG = (process.env.HELPER_PROG || path.basename(process.argv[1] || 'h')).replace(/\.m?js$/, '');
+
 const num = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
 const ENV_BASE = process.env.HELPER_BASE_URL || process.env.OPENAI_BASE_URL || '';
 
@@ -961,7 +965,7 @@ async function ensureServer() {
   if (CFG.baseExplicit || process.env.HELPER_NO_SPAWN === '1') {
     if (await healthy(CFG.base)) return;
     const why = CFG.baseExplicit ? 'HELPER_BASE_URL is set' : 'HELPER_NO_SPAWN=1';
-    throw new Error(`no server answering at ${CFG.base} (${why}, so helper will not start one)`);
+    throw new Error(`no server answering at ${CFG.base} (${why}, so ${PROG} will not start one)`);
   }
 
   // 2. a server we started earlier is still warm: reuse it (alive pid wins)
@@ -971,9 +975,9 @@ async function ensureServer() {
   if (!acquireLock()) {
     if (lockAge() > 900000) releaseLock();          // stale lock (crashed starter), take over
     if (!acquireLock()) {
-      process.stderr.write(dim('another helper is starting the model, waiting…\n'));
+      process.stderr.write(dim(`another ${PROG} is starting the model, waiting…\n`));
       if (await waitForServer(240000)) return;
-      throw new Error(`timed out waiting for another helper to start the server (log: ${LOG_FILE})`);
+      throw new Error(`timed out waiting for another ${PROG} to start the server (log: ${LOG_FILE})`);
     }
   }
   try {
@@ -1020,7 +1024,7 @@ async function ensureServer() {
 
 function stopServer() {
   const st = readState();
-  if (!st?.pid) { console.log('no helper-managed server running'); return; }
+  if (!st?.pid) { console.log(`no ${PROG}-managed server running`); return; }
   try { process.kill(st.pid, 'SIGTERM'); } catch {}
   try { unlinkSync(STATE_FILE); } catch {}
   console.log(`stopped llama-server (pid ${st.pid}, ${path.basename(st.model || '')})`);
@@ -1041,7 +1045,7 @@ async function listInstances(refresh) {
   const src = fourgetFinder() || 'finder disabled';
   console.log(`${list.length} 4get instances (${age})  ← ${src}`);
   for (const u of list) console.log('  ' + u + (fourgetBad.has(u) ? '  [failed this session]' : ''));
-  console.log(dim('cache: ' + instancesFile() + ' (refreshed weekly, or with `helper --instances refresh`)'));
+  console.log(dim('cache: ' + instancesFile() + ' (refreshed weekly, or with `${PROG} --instances refresh`)'));
 }
 
 // where this copy actually lives: /nix/store/... means a frozen `nix build` /
@@ -1052,12 +1056,12 @@ const FROZEN = SOURCE_FILE.startsWith('/nix/store/');
 async function serverStatus() {
   console.log(`source  ${SOURCE_FILE}${FROZEN ? '  (frozen build — `nix profile install .` or `nix build` again to update)' : ''}`);
   const st = readState();
-  if (!st?.pid) { console.log('no helper-managed server (helper starts one on first use)'); return; }
+  if (!st?.pid) { console.log(`no ${PROG}-managed server (${PROG} starts one on first use)`); return; }
   const alive = isAlive(st.pid);
   const answering = alive && await healthy(st.base);
   const state = alive ? (answering ? 'running' : 'running (busy or still loading)') : 'stale';
   console.log(`${state} pid=${st.pid} ${st.base} ${path.basename(st.model || '')}`);
-  if (!alive) console.log(dim('  the next `helper` call will start a fresh one'));
+  if (!alive) console.log(dim(`  the next \`${PROG}\` call will start a fresh one`));
 }
 
 // ---------------------------------------------------------------- output ---
@@ -1529,15 +1533,19 @@ async function ask(question, messages, signal) {
 
 // ------------------------------------------------------------------- cli ---
 function usage() {
-  console.log(`helper — stupid-minimal terminal helper for small local models
+  const rows = [
+    [PROG, 'interactive shell'],
+    [PROG + ' "question"', 'one-shot answer'],
+    [PROG + ' --status', 'is the model server up?'],
+    [PROG + ' --instances', 'list the 4get search instances it uses (add: refresh)'],
+    [PROG + ' --stop', 'stop the model server it started'],
+    [PROG + ' -t <tool> <arg>', 'run a single tool and print raw output (debug)'],
+  ];
+  const w = Math.max(...rows.map(([a]) => a.length));
+  console.log(`${PROG} — stupid-minimal terminal helper for small local models
 
 usage:
-  helper                 interactive shell
-  helper "question"      one-shot answer
-  helper --status        is the model server up?
-  helper --instances     list the 4get search instances it uses (add: refresh)
-  helper --stop          stop the model server helper started
-  helper -t <tool> <arg> run a single tool and print raw output (debug)
+${rows.map(([a, b]) => '  ' + a.padEnd(w) + '  ' + b).join('\n')}
 
 options:
   -m, --model <path|id>  use this .gguf file (saved as the default) or model id
@@ -1585,7 +1593,7 @@ async function main(argv) {
       const r = await runTool(toolName, toolName === 'read' ? { path: arg } : toolName === 'web_fetch' ? { url: arg } : { query: arg });
       console.log(r.text);
     } catch (e) {
-      console.error(red('helper: ') + (e.name === 'TimeoutError' ? 'timed out' : e.message));
+      console.error(red(`${PROG}: `) + (e.name === 'TimeoutError' ? 'timed out' : e.message));
       process.exit(1);
     }
     return;
@@ -1597,7 +1605,7 @@ async function main(argv) {
   try {
     await ensureServer();
   } catch (e) {
-    console.error(red('helper: ') + (e.message || e));
+    console.error(red(`${PROG}: `) + (e.message || e));
     process.exit(1);
   }
 
@@ -1607,7 +1615,7 @@ async function main(argv) {
   try {
     model = await pickModel();
   } catch (e) {
-    console.error(red('helper: ') + e.message);
+    console.error(red(`${PROG}: `) + e.message);
     process.exit(1);
   }
 
@@ -1618,17 +1626,17 @@ async function main(argv) {
       const answer = await ask(question.join(' '), messages, ac.signal);
       // one-shot: if it still asks something back, point at the shell that can reply
       if (String(answer || '').trim().endsWith('?')) {
-        process.stderr.write(dim('(one-shot answer — run `helper` with no arguments to reply in a session)\n'));
+        process.stderr.write(dim(`(one-shot answer — run \`${PROG}\` with no arguments to reply in a session)\n`));
       }
     } catch (e) {
-      console.error(red('\nhelper: ') + (e.name === 'AbortError' ? 'aborted' : e.message));
+      console.error(red(`\n${PROG}: `) + (e.name === 'AbortError' ? 'aborted' : e.message));
       process.exit(1);
     }
     return;
   }
 
   // interactive
-  console.log(dim(`helper · ${model} · ${CFG.base}`) + dim(`\n/reset  /exit  ·  cwd ${process.cwd()}\n`));
+  console.log(dim(`${PROG} · ${model} · ${CFG.base}`) + dim(`\n/reset  /exit  ·  cwd ${process.cwd()}\n`));
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: cyan('> ') });
   let ac = null;
 
@@ -1666,7 +1674,7 @@ const invokedPath = (() => {
 
 if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
   main(process.argv.slice(2)).catch((e) => {
-    console.error(red('helper: ') + (e?.stack || e));
+    console.error(red(`${PROG}: `) + (e?.stack || e));
     process.exit(1);
   });
 }

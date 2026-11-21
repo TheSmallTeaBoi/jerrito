@@ -1,6 +1,8 @@
 # helper
 
-A stupid-minimal terminal helper for small local models.
+A stupid-minimal terminal helper for small local models. The command it installs
+is **`h`** (the project is called helper; typing `helper` is not something you
+should have to do).
 
 > [!WARNING]
 > **Vibe coded.** Nearly every line here was written by a language model in
@@ -11,7 +13,7 @@ A stupid-minimal terminal helper for small local models.
 > it, and expect rough edges.
 
 ```
-$ helper "what is this project?"
+$ h "what is this project?"
 
   ⚙ read .
   ⚙ read helper.mjs
@@ -41,7 +43,7 @@ Either of these:
   Node 24, a GPU-capable `llama.cpp` (Vulkan on Linux, Metal on macOS) and a
   `helper` wrapper on PATH. Nothing else to install.
   `nix run . -- "question"` works without entering a shell, and
-  `nix profile install .` puts the packaged helper on your PATH.
+  `nix profile install .` puts the packaged `h` on your PATH.
 - **No Nix**: Node 20+ with `llama-server` on PATH, or `HELPER_BASE_URL`
   pointing at a server you already run (ollama, LM Studio, another box).
 
@@ -52,31 +54,31 @@ starts it detached, and reuses it from then on.
 ## Usage
 
 ```bash
-nix develop                       # node + llama.cpp + `helper` on PATH
-helper "what is this project?"    # one-shot answer
-helper                            # interactive shell (/reset, /help, /exit)
+nix develop                       # node + llama.cpp + `h` on PATH
+h "what is this project?"         # one-shot answer
+h                                 # interactive shell (/reset, /help, /exit)
 
-helper --status                   # is the model server up?
-helper --stop                     # stop the server helper started
-helper --instances                # which 4get search instances it uses (add: refresh)
-helper -t web_search q            # run one tool, print raw output (debugging)
-helper -t read .
-helper -t web_fetch https://nix.dev/
+h --status                        # is the model server up?
+h --stop                          # stop the server it started
+h --instances                     # which 4get search instances it uses (add: refresh)
+h -t web_search q                 # run one tool, print raw output (debugging)
+h -t read .
+h -t web_fetch https://nix.dev/
 
 -m, --model <path|id>             use this .gguf (remembered) or model id
 -u, --base-url <url>              use an existing server, never spawn
 ```
 
 A one-shot answer is exactly one turn: the model is told there is no next turn,
-so it will not ask you a follow-up. The shell (`helper` with no arguments) *does*
+so it will not ask you a follow-up. The shell (`h` with no arguments) *does*
 keep the conversation, and `/reset` clears it.
 
 Make it a normal command on your PATH:
 ```bash
-nix profile install .                     # self-contained: node + llama.cpp + git
+nix profile install .                     # self-contained: node + llama.cpp + git -> `h`
 ```
 
-Outside Nix (needs `llama-server` on PATH): `ln -sf "$PWD/helper.mjs" ~/.local/bin/helper`
+Outside Nix (needs `llama-server` on PATH): `ln -sf "$PWD/helper.mjs" ~/.local/bin/h`
 and `fish_add_path ~/.local/bin`.
 
 ## How the model part works
@@ -142,7 +144,7 @@ spawned or downloaded:
 ```bash
 export HELPER_BASE_URL=http://127.0.0.1:11434
 export HELPER_MODEL=qwen2.5:3b
-helper "what does --impure do in nix develop?"
+h "what does --impure do in nix develop?"
 ```
 
 ## Output
@@ -172,7 +174,7 @@ underlines, fenced code is left alone (and styles nest, so `**text *with
 italics* and `code`**` works). So this stays clean markdown:
 
 ```bash
-helper "how do I pin nixpkgs?" > answer.md
+h "how do I pin nixpkgs?" > answer.md
 ```
 
 Piped output is unformatted markdown (no escape codes), `NO_COLOR` disables
@@ -247,7 +249,7 @@ That is why 4get comes first: it is a proxy — one JSON request
 every instance's `/instances` browser renders:
 
 ```bash
-$ helper --instances
+$ h --instances
 21 4get instances (0h old)  ← https://git.lolcat.ca/lolcat/4get/raw/branch/master/data/config.php
   https://4get.ca
   https://search.fischbytes.de
@@ -255,7 +257,7 @@ $ helper --instances
 ```
 
 - cached in `~/.cache/helper/4get-instances.json`, refreshed after 7 days
-  (`helper --instances refresh` forces it), or immediately when every instance
+  (`h --instances refresh` forces it), or immediately when every instance
   in the list fails — that is the self-healing path;
 - the instance that answered last is remembered (`lastGood`) and tried first, so
   a repeat search is a single request; the others rotate (`cursor`), so one dead

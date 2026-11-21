@@ -9,9 +9,9 @@ changing the prompt, the tool loop, or how the thing is packaged.
 ```bash
 nix develop -c ./test/run.sh        # all suites (needs the dev shell for llama-server)
 SKIP_DOWNLOAD=1 ./test/run.sh       # skip the 1.5 GB model-download suite
-nix develop -c helper "question"    # dev shell wrapper always runs the live file
-helper --status                     # model server + which copy of helper.mjs is running
-helper --instances                  # 4get search instances in use (add: refresh)
+nix develop -c h "question"         # dev shell wrapper always runs the live file
+h --status                          # model server + which copy of helper.mjs is running
+h --instances                       # 4get search instances in use (add: refresh)
 ```
 
 ## Repo hygiene (git)
@@ -41,9 +41,9 @@ Tracked: `helper.mjs`, `README.md`, `AGENTS.md`, `LICENSE`, `flake.nix`,
    `~/.config/helper/config.json` or `~/.cache/helper/server.json`, and tool mode
    (`-t`) never builds one at all.
 3. **Mode matters.**
-   - one-shot (`helper "q"`): "nobody will reply and there is no next turn …
+   - one-shot (`h "q"`): "nobody will reply and there is no next turn …
      never ask a question, never offer to do more".
-   - interactive (`helper`): "the user sees your answer and can reply, and
+   - interactive (`h`): "the user sees your answer and can reply, and
      earlier turns are above".
    A session *does* keep history in the REPL; only the one-shot path is
    single-turn. If the model asks something back in one-shot mode, helper prints
@@ -52,7 +52,13 @@ Tracked: `helper.mjs`, `README.md`, `AGENTS.md`, `LICENSE`, `flake.nix`,
    (**local** calendar, not `toISOString()` — UTC made it a day off for a UTC-3
    user, and the model then reasons about the wrong day), the project root (git
    toplevel or cwd) and the top-level listing of that root.
-5. **Keep it small.** The prompt is paid for on every request in a small
+5. **The command name comes from the invocation**, not from a constant:
+   `PROG = HELPER_PROG || basename(argv[1])` — usage, errors, the REPL banner and
+   the one-shot hint say `h` when installed, `helper` when run as
+   `node helper.mjs`. The wrappers (flake package + dev shell) export
+   `HELPER_PROG=h`. The prompt still says `You are "helper"`: that is the
+   project, not the command.
+6. **Keep it small.** The prompt is paid for on every request in a small
    context; it is ~1.5 k chars today and `test/prompt-test.sh` fails above 2000.
 
 Tests: `test/prompt-test.sh` (31 assertions, offline — a stub server records the
@@ -66,7 +72,7 @@ non-persistence and the one-shot hint).
 
 | how you run it | which prompt you get |
 | --- | --- |
-| `nix develop` → `helper` (shellHook wrapper) | the live working-tree file |
+| `nix develop` → `h` (shellHook wrapper) | the live working-tree file |
 | `nix run .` | rebuilt from the working tree each time |
 | `nix build` / `nix profile install .` | **frozen** copy — never updates until you re-run it |
 | a REPL already running | the prompt it instanced at startup, until restarted |
@@ -76,7 +82,7 @@ A real example found in the store while debugging this:
 support, no mode-aware prompt; running it reproduced a symptom that had already
 been fixed in the working tree.
 
-Mitigation: `helper --status` prints `source  <path>` and marks `/nix/store`
+Mitigation: `h --status` prints `source  <path>` and marks `/nix/store`
 copies as `(frozen build — nix profile install . / nix build again to update)`.
 If a fix "doesn't work", check that line first: you are probably running an old
 build, or a session started before the fix.
