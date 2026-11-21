@@ -73,7 +73,7 @@ has   "prompt warns training data is stale" "training data is older than today" 
 has   "prompt ends with the answer rule" "End with the answer" "$sys"
 has   "prompt forbids repeat tool calls" "Do not call a tool twice with the same arguments" "$sys"
 tools=$(LOG="$LOG" last tools)
-[ "$tools" = 4 ] && ok "request carries the 4 tool schemas" || no "request carries 4 tool schemas" "got $tools"
+[ "$tools" = 5 ] && ok "request carries the 5 tool schemas" || no "request carries 5 tool schemas" "got $tools"
 size=${#sys}
 [ "$size" -lt 2000 ] && ok "prompt stays small ($size chars)" || no "prompt stays small" "$size chars"
 

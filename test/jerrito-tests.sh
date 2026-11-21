@@ -93,6 +93,24 @@ has "grep: says so when nothing matches" "no match for" "$out"
 out=$(node "$H" -t grep "(" "(" 2>&1)
 [ -n "$out" ] && ok "grep: invalid regex falls back to text" || no "grep: invalid regex falls back to text"
 out=$(node "$H" -t grep 2>&1); has "grep: missing pattern is reported" "needs a" "$out"
+# man: system manual pages, capped and sanitized
+mf=/tmp/jerrito-man-fixture; rm -rf "$mf"; mkdir -p "$mf/man1"
+printf '.TH FOO 1 "2026" "jerrito tests"\n.SH NAME\nfoo \\- test page for the man tool\n.SH OPTIONS\n.B -x\ndoes the thing\n' > "$mf/man1/foo.1"
+printf '.TH BAR 1\n.SH NAME\nbar \\- other page\n' > "$mf/man1/bar.1"
+out=$(MANPATH="$mf" node "$H" -t man foo 2>&1)
+has   "man: reads the page" "test page for the man tool" "$out"
+hasnt "man: no backspace overstrikes" "$(printf '\303\242\302\200\302\220')" "$out"
+out=$(MANPATH="$mf" node "$H" -t man foo 1 2>&1)
+has   "man: section argument works" "test page" "$out"
+out=$(MANPATH="$mf" node "$H" -t man nosuchpage 2>&1)
+has   "man: honest no-entry message" 'no manual entry for "nosuchpage"' "$out"
+out=$(MANPATH="$mf" node "$H" -t man -x 2>&1)
+has   "man: option-looking names rejected" "needs a page name" "$out"
+out=$(MANPATH="$mf" node "$H" -t man foo 99 2>&1)
+has   "man: unknown section is honest" 'no manual entry for "foo"' "$out"
+out=$(node "$H" -t man 2>&1); has "man: missing page is reported" "needs a page name" "$out"
+rm -rf "$mf"
+
 out=$(node "$H" -t grep x ../../etc 2>&1); c=$?
 has "grep: cannot escape the project root" "escapes project root" "$out"
 

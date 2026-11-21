@@ -164,19 +164,21 @@ markdown; that is asserted in `render-test`). Data sources:
 - **Markdown** → `**bold *italic* x**` printed raw markers; `\u0001` code
   placeholders leaked inside bold spans.
 
-## Tools (four, on purpose)
+## Tools (five)
 
 | tool | shape / limits |
 | --- | --- |
 | `grep` | regex (with `|`) over project files, optional `path` + `glob`; own walker (`walkFiles`), skips `SKIP` dirs, ignores binaries and >1.5 MB files, 60 matches, invalid regex falls back to literal |
 | `read` | one file with `offset`/`limit` (default 250 lines) or a directory listing; sandboxed to `ROOT` |
+| `man` | system man page: `man -s SEC PAGE` as two exec args (no shell, option-looking names rejected), MANWIDTH=100, groff escapes stripped, capped at CFG.chars/2; exit 16 → honest no-entry + best-effort `man -k` suggestions |
 | `web_search` | provider chain, see below |
 | `web_fetch` | readable text from a URL, see below |
 
 No shell tool, by design: a 2 B model must not be able to run anything, and the
-schema is part of the prompt budget. Adding a fifth tool costs routing accuracy —
-prefer extending an existing one (`grep` carries `path`/`glob` rather than being
-two tools). The prompt tells the model to grep first and read only the lines it
+schema is part of the prompt budget. Tools cost routing accuracy, so each one
+earns its place by answering something the others cannot: grep/read = this
+project, man = installed commands, web = the rest of the internet. Extend a tool
+before adding one (`grep` carries `path`/`glob` rather than being two tools). The prompt tells the model to grep first and read only the lines it
 finds; `prompt-test` asserts that wording exists.
 
 ## Search topology

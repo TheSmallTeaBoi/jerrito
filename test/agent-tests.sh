@@ -68,7 +68,7 @@ http.createServer(async (req, res) => {
     }
     send(res, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 7, completion_tokens: 2 } });
   } else {
-    const preview = (toolResults[0]?.content || '').slice(0, 30).replace(/\n/g, ' ');
+    const preview = (toolResults[0]?.content || '').slice(0, 120).replace(/\n/g, ' ');
     for (const w of `tools=${toolResults.length} first=${preview}`.split(' ')) delta(res, { content: w + ' ' });
     send(res, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 9, completion_tokens: 4 } });
   }
@@ -118,7 +118,7 @@ has   "answer starting with {: printed as written" "is just a JSON object" "$out
 out=$(run "use unknown tool"); c=$?
 [ "$c" = 0 ] && ok "unknown tool: exit 0" || no "unknown tool: exit" "got $c"
 has "unknown tool: names the bad tool" "Unknown tool" "$out"
-has "unknown tool: lists real tools" "Available: read, grep, web_search, web_fetch" "$out"
+has "unknown tool: lists real tools" "Available: read, grep, man, web_search, web_fetch" "$out"
 
 out=$(EXTRA="JERRITO_MAX_CHARS=1200" run "big read"); c=$?
 [ "$c" = 0 ] && ok "big read + tiny budget: no hang" || no "big read + tiny budget" "exit $c (timeout?)"

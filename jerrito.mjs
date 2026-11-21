@@ -681,6 +681,41 @@ function grepTool(pattern, relPath, glob) {
   return `${out.length}${cut ? '+' : ''} match${out.length === 1 ? '' : 'es'} for ${JSON.stringify(pat)} in ${filesHit} file${filesHit === 1 ? '' : 's'} ${where}\n` + out.join('\n');
 }
 
+/** man page -> plain text, capped. No shell: page/section are separate exec
+ *  args, rejected if they look like options. Best-effort suggestions via
+ *  `man -k` when there is no entry; honest no-entry message otherwise. */
+function manTool(page, section) {
+  const p = String(page ?? '').trim();
+  const sec = String(section ?? '').trim();
+  if (!p || p.startsWith('-') || !/^[\w.:+-]+$/.test(p)) return 'man needs a page name (e.g. "chmod", "systemd.unit").';
+  if (sec && !/^[0-9a-z+]+$/i.test(sec)) return `invalid section "${clip(sec, 20)}" — use a number like 1 or 5.`;
+  const argv = sec ? ['-s', sec, p] : [p];
+  const env = { ...process.env, MANWIDTH: '100', MANPAGER: 'cat', PAGER: 'cat' };
+  let text = '';
+  try {
+    text = execFileSync('man', argv, { encoding: 'utf8', timeout: 8000, env, stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch (e) {
+    text = e.stdout || '';
+    if (!text.trim()) {
+      // exit 16 = no manual entry; ask `man -k` for near names (best effort)
+      let near = '';
+      try {
+        near = execFileSync('man', ['-k', p], { encoding: 'utf8', timeout: 5000, env, stdio: ['ignore', 'pipe', 'ignore'] });
+      } catch {}
+      const lines = near.split('\n').filter(Boolean).slice(0, 6);
+      return `no manual entry for ${JSON.stringify(p)}${lines.length ? '. Closest matches:\n' + lines.join('\n') : ''}`;
+    }
+  }
+  // strip groff backspace-overstrikes and SGR escapes; collapse blank runs
+  const clean = text.replace(/\x1b\[[0-9;]*m/g, '').replace(/.\x08/g, '').replace(/\n{3,}/g, '\n\n');
+  const cap = Math.min(8000, Math.max(2000, Math.floor(CFG.chars / 2)));
+  if (clean.length > cap) {
+    const cut = clean.lastIndexOf('\n', cap);
+    return clean.slice(0, cut > 0 ? cut : cap) + `\n[…page truncated — ${clean.length - cap} more chars; ask for a section]`;
+  }
+  return clean;
+}
+
 function readTool(rel, offset, limit) {
   const abs = resolveIn(rel);
   const st = statSync(abs);
@@ -759,6 +794,21 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'man',
+      description: 'Read a manual page installed on this system (flags, behavior, exit codes). Use it for command specifics instead of guessing; if there is no entry, fall back to your knowledge or web_search.',
+      parameters: {
+        type: 'object',
+        properties: {
+          page: { type: 'string', description: 'manual page name, e.g. "chmod"' },
+          section: { type: 'string', description: 'optional section number, e.g. "1" or "5"' },
+        },
+        required: ['page'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'web_search',
       description: 'Search the web. Use for public facts, docs, software versions and news. Not for files in this project. Returns titles, URLs and short descriptions.',
       parameters: {
@@ -792,7 +842,8 @@ async function runTool(name, args) {
       return { text: await webFetch(String(args.url)), hint: args.url };
     case 'read': return { text: readTool(String(args.path ?? '.'), args.offset, args.limit), hint: args.path };
     case 'grep': return { text: grepTool(args.pattern, args.path, args.glob), hint: args.pattern };
-    default: return { text: `Unknown tool "${name}". Available: read, grep, web_search, web_fetch.`, hint: name };
+    case 'man': return { text: manTool(args.page, args.section), hint: args.page };
+    default: return { text: `Unknown tool "${name}". Available: read, grep, man, web_search, web_fetch.`, hint: name };
   }
 }
 
@@ -1378,7 +1429,8 @@ function joinFitted(items, width) {
 /** "read flake.nix" / "read README.md:250-499" / "web_search \"nix 1.0\"" */
 function describeCall(name, args = {}, compact = false) {
   if (typeof args === 'string') args = { path: args };
-  const h = String(args.query ?? args.url ?? args.pattern ?? args.path ?? '').replace(/\s+/g, ' ').trim();
+  const h = String(args.query ?? args.url ?? args.pattern ?? args.path ?? args.page ?? '').replace(/\s+/g, ' ').trim();
+  if (name === 'man') return `man ${clip(h, 30)}${args.section ? `(${args.section})` : ''}`;
   if (name === 'grep') return `grep ${JSON.stringify(clip(h, 40))}${args.glob ? ' ' + args.glob : ''}`;
   if (name === 'read') {
     if (!h) return 'read .';
@@ -1529,16 +1581,15 @@ function systemPrompt(interactive) {
     mode,
     'Rules:',
     '1. Every question is in scope; the project is context, not a filter. Never say "not related to this project".',
-    '2. Well-known commands and facts: answer from what you know, but never invent unsure details. File contents and names: never guess — grep first (pattern; | for alternatives), then read only those lines.',
+    '2. Well-known commands and facts: answer from what you know, but never invent unsure details. For command details use the man tool first (web_search if no entry). File contents and names: never guess — grep first (pattern; | for alternatives), then read only those lines.',
     '3. For news, versions, prices or anything that may have changed, call web_search (then web_fetch on the best URL). Your training data is older than today.',
     '4. You cannot run shell commands. When a command is needed, print the exact command in a code block and explain it in one line.',
     '5. Say where an answer came from (file path or URL). If a tool returns nothing, say so instead of making something up.',
     '6. Plain text, no emoji, no preamble, under 120 words unless asked for detail.',
     '7. Stop calling tools once you have enough to answer. Two searches that did not help means: say so.',
     '8. End with the answer, not with a question or an offer to do more.',
-    '9. Do not call a tool twice with the same arguments; the result is already above. For a large file read the range you need (offset/limit).',
-    'Example: "what does jerrito.mjs do?" -> read({"path":"jerrito.mjs"}), then answer from its contents.',
-    'Example: "where are screens configured?" -> grep({"pattern":"screens"}), then read the file:line it returns.',
+    '9. Do not call a tool twice with the same arguments. For a large file read the range you need (offset/limit).',
+    'Example: "where is X configured?" -> grep({"pattern":"X"}), then read the file:line it returns.',
     '',
     system,
     '',
@@ -1845,6 +1896,7 @@ async function main(argv) {
       const args = toolName === 'read' ? { path: arg }
         : toolName === 'web_fetch' ? { url: arg }
         : toolName === 'grep' ? { pattern: question[0] || '', path: question[1], glob: question[2] }
+        : toolName === 'man' ? { page: question[0] || '', section: question[1] }
         : { query: arg };
       const r = await runTool(toolName, args);
       console.log(r.text);

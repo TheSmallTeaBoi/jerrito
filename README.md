@@ -24,12 +24,13 @@ jerrito.mjs is a single-file CLI that answers questions using four tools:
 grep and read (local files), web_search and web_fetch. It runs a small local model...
 ```
 
-Four tools, no dependencies, one file. It is meant to run against a 1–4B model
+Five tools, no dependencies, one file. It is meant to run against a 1–4B model
 on a laptop CPU and still be useful: explain a repo, find the right flag, tell
 you what a command does, look something up on the web.
 
 ```
 grep         search inside project files -> path:line: text (regex, | for alternatives)
+man          read a manual page installed on this system (page [section])
 read         read a file (or list a dir) inside the current project
 web_search   DDG lite scraper -> title / url / description only
 web_fetch    curl + HTML -> markdown ("reading mode")
@@ -287,6 +288,13 @@ Before this existed, "how do I configure screens?" made the model read 250-line
 ranges of a 2000-line `docs/options.md` five times, miss, then print a tool call
 as text. Now it greps, gets `docs/options.md:1250: screens.autoLayout...` and
 reads one range.
+
+**man** runs the system `man` (no shell: page and section are separate exec args,
+option-looking names rejected) and returns plain text — groff backspace
+overstrikes and SGR escapes stripped, capped with a truncation note. No entry →
+an honest `no manual entry` message (plus best-effort `man -k` suggestions),
+which the prompt tells the model to follow with knowledge or web_search instead
+of inventing flags.
 
 **web_search** tries **4get** first (`https://4get.ca` and a mirror by default): a search
 proxy that scrapes from *its* IP, so it keeps working when this machine's IP is

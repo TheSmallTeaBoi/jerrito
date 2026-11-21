@@ -99,6 +99,12 @@
             nixpkgs.overlays = [ self.overlays.default ];
             environment.systemPackages = [ config.programs.jerrito.package ];
             hardware.graphics.enable = lib.mkIf config.programs.jerrito.gpu (lib.mkDefault true);
+            # the man tool is only as good as the system's man pages: with
+            # documentation.enable = false the docs module does not link
+            # /share/man, so man-db finds no pages at all (exit 16 for every
+            # query). jerrito's value case for man makes docs worth having;
+            # hosts that really want it off can still override this
+            documentation.enable = lib.mkDefault true;
           };
         };
     };
