@@ -14,6 +14,31 @@ h --status                          # model server + which copy of helper.mjs is
 h --instances                       # 4get search instances in use (add: refresh)
 ```
 
+## Packaging — flake outputs
+
+| output | for |
+| --- | --- |
+| `packages.<system>.default` | `h` with GPU offload (Vulkan on Linux, Metal on macOS) |
+| `packages.<system>.cpu` | `h` with the CPU-only llama.cpp |
+| `apps.<system>.default` | `nix run . -- "question"` |
+| `overlays.default` | `pkgs.h` / `pkgs.h-cpu`, built against the consumer's nixpkgs |
+| `nixosModules.default` | `programs.helper.{enable,gpu,package}` |
+| `devShells.<system>.default` | node + llama.cpp + an `h` wrapper in `.direnv/bin` |
+
+Rules that keep this honest:
+
+- The wrapper **must** export `HELPER_PROG=h`: the packaged binary is a shell
+  script that runs `node .../helper.mjs`, so node cannot see the name it was
+  invoked as. Without it, usage and errors say `helper.mjs`.
+- The module applies `overlays.default` itself, so `pkgs.h` comes from the
+  consumer's pinned nixpkgs instead of dragging a second nixpkgs in.
+- `hardware.graphics.enable` is set with `mkDefault` — a headless host must be
+  able to override it (or pick `pkgs.h-cpu`).
+- After touching the flake: `nix flake check`, then evaluate the module in a
+  throwaway `nixosSystem` and assert `programs.helper.enable = true` puts `h`
+  in `environment.systemPackages` (that is the only way to catch a broken
+  `pkgs.h` reference — it fails at eval, not at build).
+
 ## Repo hygiene (git)
 
 Tracked: `helper.mjs`, `README.md`, `AGENTS.md`, `LICENSE`, `flake.nix`,

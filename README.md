@@ -81,6 +81,55 @@ nix profile install .                     # self-contained: node + llama.cpp + g
 Outside Nix (needs `llama-server` on PATH): `ln -sf "$PWD/helper.mjs" ~/.local/bin/h`
 and `fish_add_path ~/.local/bin`.
 
+## Install it in your NixOS config
+
+The flake exposes `packages.<system>.{default,cpu}`, `overlays.default` and
+`nixosModules.default`.
+
+**Module** — installs `h`, enables GPU offload, and builds against *your*
+pinned nixpkgs (no second copy of it):
+
+```nix
+{
+  inputs.helper.url = "github:TheSmallTeaBoi/helper";
+
+  outputs = { self, nixpkgs, helper, ... }: {
+    nixosConfigurations.box = nixpkgs.lib.nixosSystem {
+      modules = [
+        helper.nixosModules.default
+        {
+          programs.helper.enable = true;        # -> `h` on PATH
+          # programs.helper.gpu = false;       # don't enable graphics drivers
+          # programs.helper.package = pkgs.h-cpu;  # CPU-only build
+        }
+      ];
+    };
+  };
+}
+```
+
+**Overlay + plain packages** — same thing, no module:
+
+```nix
+{ inputs, pkgs, ... }:
+{
+  nixpkgs.overlays = [ inputs.helper.overlays.default ];
+  environment.systemPackages = [ pkgs.h ];   # or: home.packages = [ pkgs.h ];
+}
+```
+
+**No overlay** — simplest, but pulls this flake's own nixpkgs as a second copy:
+
+```nix
+environment.systemPackages = [ inputs.helper.packages.${pkgs.stdenv.hostPlatform.system}.default ];
+```
+
+The package wraps its own `node`, `llama-server` and `git`, so there is nothing
+else to enable. GPU offload needs drivers: the module sets
+`hardware.graphics.enable = true` with `mkDefault` (override it, or use
+`pkgs.h-cpu` on a headless box). Models are still per-user, in
+`~/.cache/helper/models`.
+
 ## How the model part works
 
 On first use, in order:
