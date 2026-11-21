@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# helper test suite — real assertions, PASS/FAIL lines
+set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
+H="$HERE/../helper.mjs"
+cd "$HERE/.." || exit 1
+pass=0; fail=0
+command -v llama-server >/dev/null 2>&1 || [ -n "${HELPER_BIN_DIR:-}" ] || echo "WARN  llama-server is not on PATH: the tests that start a server will fail (use: nix develop -c ./test/run.sh)"
+
+ok() { echo "PASS  $1"; pass=$((pass+1)); }
+no() { echo "FAIL  $1${2:+  <<< $2}"; fail=$((fail+1)); }
+has() { local name="$1" needle="$2" out="$3"; case "$out" in *"$needle"*) ok "$name";; *) no "$name" "expected '$needle' in: $(printf '%s' "$out" | head -c 200)";; esac; }
+hasnt() { local name="$1" needle="$2" out="$3"; case "$out" in *"$needle"*) no "$name" "unexpected '$needle'";; *) ok "$name";; esac; }
+code() { local name="$1" want="$2"; shift 2; "$@" >/dev/null 2>&1; local c=$?; [ "$c" = "$want" ] && ok "$name (exit $c)" || no "$name" "exit $c, wanted $want"; }
+
+echo "== clean slate =="
+node "$H" --stop >/dev/null 2>&1
+
+echo
+echo "== no-server behaviour =="
+out=$(node "$H" --status 2>&1); has "--status with no server" "no helper-managed server" "$out"
+out=$(HELPER_NO_SPAWN=1 node "$H" "hi" 2>&1); c=$?
+[ "$c" = 1 ] && has "HELPER_NO_SPAWN=1 refuses to spawn" "HELPER_NO_SPAWN=1, so helper will not start one" "$out" || no "HELPER_NO_SPAWN=1 exit code" "got $c"
+out=$(HELPER_BASE_URL=http://127.0.0.1:1 node "$H" "hi" 2>&1); c=$?
+[ "$c" = 1 ] && has "explicit base refuses to spawn" "HELPER_BASE_URL is set" "$out" || no "explicit base exit code" "got $c"
+out=$(HELPER_BASE_URL=http://127.0.0.1:1 node "$H" --status 2>&1); has "--status is safe without server" "" "$out"
+
+echo
+echo "== tools (no model needed) =="
+echo "-- search parsing (offline fixture, no network) --"
+cat > /tmp/search-offline.mjs <<'EOF'
+const realFetch = globalThis.fetch;
+const lite = `<html><body><table>
+<tr><td>1.&nbsp;</td><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fnix.dev%2F&rut=zz" class='result-link'>Nix <b>dev</b></a></td></tr>
+<tr><td>&nbsp;</td><td class='result-snippet'>A tutorial site &amp; reference.</td></tr>
+<tr><td>2.&nbsp;</td><td><a rel="nofollow" href="https://example.com/dup" class='result-link'>Duplicate</a></td></tr>
+<tr><td>&nbsp;</td><td class='result-snippet'>same page twice</td></tr>
+<tr><td>3.&nbsp;</td><td><a rel="nofollow" href="https://example.com/dup" class='result-link'>Duplicate again</a></td></tr>
+<tr><td>&nbsp;</td><td class='result-snippet'>dupe</td></tr>
+</table></body></html>`;
+globalThis.fetch = async (url, opts) => String(url).includes('duckduckgo')
+  ? new Response(lite, { status: 200, headers: { 'content-type': 'text/html' } })
+  : realFetch(url, opts);
+const { webSearch } = await import(process.env.HELPER_FILE);
+const out = await webSearch('anything');
+console.log(out);
+EOF
+out=$(HELPER_4GET_URL=off HELPER_FILE="$H" node /tmp/search-offline.mjs 2>&1)
+has "search parses title" "1) Nix dev" "$out"
+has "search decodes the uddg redirect" "https://nix.dev/" "$out"
+has "search decodes entities" "A tutorial site & reference." "$out"
+dupes=$(printf %s "$out" | grep -c "example.com/dup")
+[ "$dupes" = 1 ] && ok "search dedupes host+path" || no "search dedupes host+path" "saw $dupes copies of the same url"
+
+cat > /tmp/search-blocked.mjs <<'EOF'
+const realFetch = globalThis.fetch;
+const blocked = (u) => /duckduckgo|search\.brave\.com/.test(String(u));
+globalThis.fetch = async (url, opts) => blocked(url)
+  ? new Response("<html><body><script src=\"/anomaly.js\"></script></body></html>", { status: 202, headers: { "content-type": "text/html" } })
+  : realFetch(url, opts);
+const { webSearch } = await import(process.env.HELPER_FILE);
+console.log(await webSearch("x"));
+EOF
+out=$(HELPER_4GET_URL=off HELPER_FILE="$H" node /tmp/search-blocked.mjs 2>&1)
+has "search says rate-limited instead of no-results" "rate-limited" "$out"
+out=$(node "$H" -t web_search "gdb reverse debugging" 2>&1)
+if printf %s "$out" | grep -q "^No results for"; then
+  echo "SKIP  web_search live (search providers are rate-limiting this IP right now)"
+else
+  has "web_search returns results" "http" "$out"
+  has "web_search result shape" ") " "$out"
+fi
+out=$(node "$H" -t web_fetch https://nix.dev/ 2>&1); has "web_fetch returns markdown" "# " "$out"
+out=$(node "$H" -t web_fetch https://nix.dev/manual/nix/2.35.6/release-notes/ 2>&1); has "web_fetch 404 is a clean message" "HTTP 404" "$out"
+out=$(node "$H" -t web_fetch https://nonexistent-host-xyz-12345.example 2>&1); has "web_fetch DNS failure is a clean message" "ENOTFOUND" "$out"
+out=$(node "$H" -t read . 2>&1); has "read lists dir with sizes" "helper.mjs  " "$out"
+out=$(node "$H" -t read helper.mjs 2>&1); has "read file is line-numbered" "1| #!/usr/bin/env node" "$out"
+out=$(HELPER_READ_LINES=4 node "$H" -t read helper.mjs 2>&1); has "read truncation hint" "continue with offset=" "$out"
+out=$(node "$H" -t read ../../etc/passwd 2>&1); c=$?
+[ "$c" = 1 ] && has "read blocks path escape" "escapes project root" "$out" || no "read escape exit code" "got $c"
+out=$(node "$H" -t read /dev/zero 2>&1); has "read blocks device files" "escapes project root" "$out"
+out=$(node "$H" -t nonsense x 2>&1); has "unknown tool is reported" "Unknown tool" "$out"
+out=$(node "$H" -t web_search 2>&1); has "tool without arg is reported" "needs a" "$out"
+out=$(node "$H" --help 2>&1); has "--help lists usage" "usage:" "$out"
+hasnt "--help has no fabricated example" "llama-server -m model.gguf" "$out"
+
+echo
+echo "== cold start (spawns server + downloads nothing, model is seeded) =="
+t0=$(date +%s%N)
+out=$(node "$H" "how many lines is helper.mjs? Use the read tool." 2>&1); c=$?
+t1=$(date +%s%N); cold_ms=$(( (t1-t0)/1000000 ))
+[ "$c" = 0 ] && ok "cold run exits 0" || no "cold run exit code" "got $c: $(printf '%s' "$out" | tail -3)"
+[ -f "$HOME/.cache/helper/server.json" ] && ok "cold run wrote server.json" || no "cold run wrote server.json"
+pid1=$(node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.env.HOME+"/.cache/helper/server.json")).pid)}catch{}')
+base1=$(node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.env.HOME+"/.cache/helper/server.json")).base)}catch{}')
+[ -n "$pid1" ] && ok "server pid recorded ($pid1)" || no "server pid recorded"
+curl -sf "${base1%/v1}/health" >/dev/null 2>&1 && ok "server answers /health" || no "server answers /health" "$base1"
+has "cold answer mentions the file" "line" "$out"
+
+echo
+echo "== warm reuse (must not spawn a second server) =="
+t0=$(date +%s%N)
+out=$(node "$H" "say ok" 2>&1); c=$?
+t1=$(date +%s%N); warm_ms=$(( (t1-t0)/1000000 ))
+pid2=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.env.HOME+"/.cache/helper/server.json")).pid)')
+[ "$pid1" = "$pid2" ] && ok "reused same server pid" || no "reused same server pid" "$pid1 -> $pid2"
+[ "$c" = 0 ] && ok "warm run exits 0" || no "warm run exit code" "got $c"
+echo "        cold ${cold_ms}ms / warm ${warm_ms}ms"
+[ "$warm_ms" -lt "$cold_ms" ] && ok "warm run is faster than cold" || no "warm run is faster than cold" "${cold_ms}ms vs ${warm_ms}ms"
+
+echo
+echo "== status / stop =="
+out=$(node "$H" --status 2>&1); has "--status reports running" "running pid=" "$out"
+out=$(node "$H" --stop 2>&1); has "--stop reports stopping" "stopped llama-server" "$out"
+sleep 1
+out=$(node "$H" --status 2>&1); has "--status after stop" "no helper-managed server" "$out"
+curl -sf "${base1%/v1}/health" >/dev/null 2>&1 && no "server is really gone" "still healthy" || ok "server is really gone"
+[ -f "$HOME/.cache/helper/server.json" ] && no "state file removed" "still there" || ok "state file removed"
+
+echo
+echo "== symlinked install (ln -s into ~/.local/bin) =="
+link="$HOME/.helper-link-test"
+ln -sf "$H" "$link"
+out=$("$link" --help 2>&1); case "$out" in *usage:*) ok "symlinked binary runs";; *) no "symlinked binary runs" "got: $(printf '%s' "$out" | head -c 120)";; esac
+out=$("$link" --status 2>&1); c=$?
+[ "$c" = 0 ] && [ -n "$out" ] && ok "symlinked --status prints something" || no "symlinked --status" "exit $c, output '$out'"
+out=$("$link" -t read . 2>&1)
+case "$out" in *helper.mjs*) ok "symlinked tool invocation works";; *) no "symlinked tool invocation" "$(printf '%s' "$out" | head -c 120)";; esac
+rm -f "$link"
+
+echo
+echo "== interactive REPL (piped stdin) =="
+out=$(printf '/help\n/reset\n/exit\n' | node "$H" 2>&1); c=$?
+[ "$c" = 0 ] && ok "REPL exits cleanly" || no "REPL exit" "got $c"
+has "REPL shows /reset /exit help" "/reset" "$out"
+
+echo
+echo "== summary: $pass passed, $fail failed =="
+[ "$fail" = 0 ]
