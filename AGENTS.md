@@ -112,6 +112,23 @@ copies as `(frozen build — nix profile install . / nix build again to update)`
 If a fix "doesn't work", check that line first: you are probably running an old
 build, or a session started before the fix.
 
+## The footer
+
+Every answer gets a dim footer line — `— 14.2 tok/s · 187 tok · search 0.8s ·
+3 tools · 4.6s` — printed to **stdout, TTY only** (piped output must stay clean
+markdown; that is asserted in `render-test`). Data sources:
+
+- `complete()` sends `timings_per_token: true`; llama.cpp answers every SSE
+  chunk with cumulative `timings`, and the last one (`predicted_n`,
+  `predicted_ms`) is exact. A 400 that mentions `timings` flips a module flag
+  (`askTimings`) and retries once without the parameter — other 400s still go
+  to the context-overflow handler in `ask()`.
+- Servers without timings: content deltas are counted (`reasoning_content` is
+  not), ms is wall time between first and last content delta.
+- `render.usage()` accumulates per completion (a turn can run several);
+  `render.footer()` divides. Tool wall time is measured `tool()` → `toolResult()`
+  per name (search/fetch). `HELPER_STATS` still prints raw counts to stderr.
+
 ## Bugs that already bit us (don't reintroduce)
 
 - **UTC date in the prompt** → wrong day for the user (fixed: local date).

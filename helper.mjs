@@ -1383,6 +1383,9 @@ function makeTurnRenderer() {
   const md = mdStream();
   const calls = [];
   let thinkChars = 0, thinkTail = '', answered = false, drawn = false, lastStatus = 0;
+  // footer data: generation speed/tokens, per-tool wall time
+  let tok = 0, genMs = 0, toolCount = 0, toolStart = 0;
+  const toolMs = {};
 
   const summary = () => {
     const bits = [];
@@ -1426,6 +1429,8 @@ function makeTurnRenderer() {
 
     tool(name, args) {
       calls.push([name, args]);
+      toolCount++;
+      toolStart = Date.now();
       const w = Math.max(10, COLS() - 6);
       let d = describeCall(name, args);
       if (d.length > w) d = describeCall(name, args, true);
@@ -1434,8 +1439,33 @@ function makeTurnRenderer() {
     },
 
     toolResult(text) {
+      if (toolStart) {
+        const name = calls[calls.length - 1]?.[0] || '';
+        toolMs[name] = (toolMs[name] || 0) + (Date.now() - toolStart);
+        toolStart = 0;
+      }
       panel.line(`→ ${clip(String(text).split('\n')[0], Math.max(10, COLS() - 10))}`);
       drawn = true;
+    },
+
+    /** per-completion generation stats (llama.cpp timings, or a delta-count fallback) */
+    usage(u) {
+      tok += u.tok || 0;
+      genMs += u.ms || 0;
+    },
+
+    /** one dim line under the answer: speed, tokens, tool time. TTY only —
+     *  piped stdout stays clean markdown */
+    footer() {
+      if (!TTY || !tok) return;
+      const bits = [];
+      if (genMs > 0) bits.push(`${(tok / (genMs / 1000)).toFixed(1)} tok/s`);
+      bits.push(`${tok} tok`);
+      if (toolMs.web_search) bits.push(`search ${(toolMs.web_search / 1000).toFixed(1)}s`);
+      if (toolMs.web_fetch) bits.push(`fetch ${(toolMs.web_fetch / 1000).toFixed(1)}s`);
+      if (toolCount) bits.push(`${toolCount} tool${toolCount === 1 ? '' : 's'}`);
+      bits.push(`${((Date.now() - t0) / 1000).toFixed(1)}s`);
+      process.stdout.write(mdDim('— ' + bits.join(' · ')) + '\n');
     },
 
     finish() {
@@ -1503,12 +1533,12 @@ async function pickModel() {
 }
 
 /** One streamed completion. Returns {content, toolCalls}. */
+// llama.cpp fills every SSE chunk with cumulative timings when asked; servers
+// that reject the parameter are remembered so we do not ask again this run
+let askTimings = true;
+
 async function complete(messages, signal, render, { allowTools = true } = {}) {
-  const res = await fetch(CFG.base + '/chat/completions', {
-    method: 'POST',
-    signal,
-    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.key },
-    body: JSON.stringify({
+  const body = {
       model: CFG.model,
       messages,
       ...(allowTools ? { tools: TOOLS, tool_choice: 'auto' } : {}),
@@ -1516,8 +1546,19 @@ async function complete(messages, signal, render, { allowTools = true } = {}) {
       max_tokens: CFG.maxTokens,
       ...SAMPLING,
       stream: true,
-    }),
+  };
+  if (askTimings) body.timings_per_token = true;
+  const res = await fetch(CFG.base + '/chat/completions', {
+    method: 'POST',
+    signal,
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CFG.key },
+    body: JSON.stringify(body),
   });
+
+  if (!res.ok && askTimings && res.status === 400 && /timings/i.test(await res.clone().text())) {
+    askTimings = false;
+    return complete(messages, signal, render, { allowTools });
+  }
 
   if (!res.ok) {
     const body = (await res.text()).slice(0, 400);
@@ -1531,10 +1572,20 @@ async function complete(messages, signal, render, { allowTools = true } = {}) {
     if (m.reasoning_content) render.think(m.reasoning_content);
     const textCall = (m.tool_calls || []).length ? null : parseTextCall(m.content || '');
     if (textCall) return { content: '', toolCalls: [asCall(textCall)] };
+    if (m.content) render.answer(m.content);
+    if (CFG.stats) showStats(j.usage);
+    const t = j.timings;
+    render.usage(t
+      ? { tok: t.predicted_n || 0, ms: t.predicted_ms || 0, promptTok: t.prompt_n, promptMs: t.prompt_ms }
+      : { tok: j.usage?.completion_tokens || 0, ms: 0 });
+    return { content: m.content || '', toolCalls: m.tool_calls || [] };
   }
 
   let buf = '', content = '';
   const calls = [];
+  // servers without timings: each content delta is ~one token, close enough
+  // for a footer; reasoning deltas do not count (they are not the answer)
+  let deltas = 0, firstAt = 0, lastAt = 0, lastTimings = null;
   // small reasoning models put their chain of thought in reasoning_content;
   // it is shown in the panel and never stored in history
   const think = (t) => render.think(t);
@@ -1564,8 +1615,12 @@ async function complete(messages, signal, render, { allowTools = true } = {}) {
       if (CFG.stats && j.usage) showStats(j.usage);
       const d = j.choices?.[0]?.delta;
       if (!d) continue;
+      if (j.timings) lastTimings = j.timings;
       if (d.reasoning_content) think(d.reasoning_content);
-      if (d.content) answer(d.content);
+      if (d.content) {
+        answer(d.content);
+        if (!lastTimings) { deltas++; lastAt = Date.now(); if (!firstAt) firstAt = lastAt; }
+      }
       if (Array.isArray(d.tool_calls)) {
         for (const tc of d.tool_calls) {
           const i = Number.isInteger(tc.index) ? tc.index : calls.length;
@@ -1579,6 +1634,11 @@ async function complete(messages, signal, render, { allowTools = true } = {}) {
     }
   }
   const toolCalls = calls.filter(Boolean);
+  if (lastTimings) {
+    render.usage({ tok: lastTimings.predicted_n || 0, ms: lastTimings.predicted_ms || 0, promptTok: lastTimings.prompt_n, promptMs: lastTimings.prompt_ms });
+  } else if (deltas) {
+    render.usage({ tok: deltas, ms: lastAt - firstAt });
+  }
   if (holding) {
     const textCall = toolCalls.length ? null : parseTextCall(held);
     if (textCall) return { content: '', toolCalls: [asCall(textCall)] };
@@ -1661,6 +1721,7 @@ async function ask(question, messages, signal) {
 
     if (!toolCalls.length) {
       render.finish();
+      render.footer();
       if (!content.trim()) {
         process.stdout.write(yellow(step === 0
           ? '(empty response — try a bigger HELPER_MAX_TOKENS)'

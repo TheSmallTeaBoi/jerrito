@@ -211,6 +211,15 @@ collapse into a single line as soon as the answer starts.
 ▸ read flake.nix · read README.md:120-180 · web_search "nixos-unstable llama-cpp-vulkan" · thought 0.4k · 4.2s
 
 The flake pulls `llama-cpp-vulkan` from nixos-unstable, so ...
+— 14.2 tok/s · 187 tok · search 0.8s · 3 tools · 4.6s
+```
+
+When stdout is a terminal, a dim footer lands under each answer: generation
+speed and tokens (real llama.cpp timings — on other servers approximated by
+counting streamed tokens), how long web_search / web_fetch took, and the tool
+count. Piped output stays clean markdown — the footer is never printed to a
+pipe, and `HELPER_STATS=1` still dumps raw token counts on stderr for
+debugging.
 ```
 
 The summary keeps the *arguments* (file path, query, host) precisely so the

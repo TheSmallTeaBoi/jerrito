@@ -83,7 +83,9 @@ http.createServer(async (req, res) => {
   } else {
     for (const line of ['Here is **bold** and `code`.', '- a [link](https://nix.dev) item']) delta(res, { content: line + '\n' });
   }
-  send(res, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+  // llama.cpp sends cumulative timings in every chunk when asked; the footer
+  // uses the last one. include it so the primary (server-timings) path is tested
+  send(res, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], timings: { prompt_n: 500, prompt_ms: 200, predicted_n: 42, predicted_ms: 3000 } });
   res.write('data: [DONE]\n\n');
   res.end();
 }).listen(Number(process.env.MOCK_PORT), '127.0.0.1');
@@ -122,6 +124,9 @@ has   "pipe: markdown left as-is" "**bold**" "$pipe_out"
 hasnt "pipe: no escape codes" "$(printf '\033[')" "$pipe_out"
 has   "pipe + FORCE_COLOR: styled answer" "$(printf '\033[1mbold')" "$pipe_forced"
 hasnt "pipe + FORCE_COLOR: no cursor erasing" "$(printf '\033[J')" "$pipe_forced"
+
+has   "pty: footer shows tok/s" "tok/s" "$pty_out"
+hasnt "pipe: no footer in piped output" "tok/s" "$pipe_out"
 
 empty_out=$(script -qec "env HELPER_BASE_URL=http://127.0.0.1:$MP/v1 node $H 'empty answer'" /dev/null 2>&1 | tr -d '\r')
 case "$empty_out" in
