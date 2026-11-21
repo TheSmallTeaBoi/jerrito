@@ -129,6 +129,13 @@ build, or a session started before the fix.
   back (21 instances silently became 19), and remembering a working instance
   excluded the alternatives. It now only advances a cursor, keeps the full list,
   and prefers `lastGood` *plus* the rest.
+- **Tool calls printed as text** → a small model sometimes writes the call as
+  prose instead of using `tool_calls`: `<function name="read"><param
+  name="path">x</param></function>`, `<function=read>{"path":"x"}</function>`,
+  or a bare `{"name":"read","arguments":{...}}`. helper printed that markup as
+  the answer. `parseTextCall()` now turns those into real calls, and the
+  streamed answer holds its first characters back until it can tell prose from
+  markup (flush as soon as it is not `<`/`{`, or after 700 chars).
 - **Empty-answer notice erased** → printed before the panel collapsed, so the
   erase wiped it.
 - **Markdown** → `**bold *italic* x**` printed raw markers; `\u0001` code

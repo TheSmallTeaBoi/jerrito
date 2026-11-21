@@ -701,6 +701,56 @@ async function runTool(name, args) {
   }
 }
 
+/** A call a model wrote as text instead of in tool_calls:
+ *    <function name="read"><param name="path">a.md</param></function>
+ *    <function=read>{"path":"a.md"}</function>
+ *    {"name":"read","arguments":{"path":"a.md"}}
+ *  Returns { name, args } or null. */
+function parseTextCall(text) {
+  const s = String(text || '').trim();
+  if (!s) return null;
+  const known = new Set(TOOLS.map((t) => t.function.name));
+  const obj = (raw) => {
+    const v = String(raw || '').trim().replace(/^```[a-z]*\n?|\n?```$/gi, '');
+    try { const j = JSON.parse(v); return j && typeof j === 'object' ? j : null; } catch { return null; }
+  };
+
+  // 1. <function name="read"> <param name="path">x</param> </function>
+  let m = /^<function\s+name=["']?([\w.:-]+)["']?\s*>([\s\S]*)<\/function>$/i.exec(s);
+  if (m && known.has(m[1])) {
+    const args = {};
+    const re = /<param\s+name=["']?([\w.:-]+)["']?\s*>([\s\S]*?)<\/param>/gi;
+    let p;
+    while ((p = re.exec(m[2]))) args[p[1]] = /^\s*-?\d+\s*$/.test(p[2]) ? Number(p[2]) : p[2].trim();
+    const inline = obj(m[2]);
+    if (inline) Object.assign(args, inline);
+    if (Object.keys(args).length) return { name: m[1], args };
+  }
+
+  // 2. <function=read>{"path":"x"}</function>  (and without the closing tag)
+  m = /^<function=([\w.:-]+)\s*>?\s*([\s\S]*?)(?:<\/function>)?$/i.exec(s);
+  if (m && known.has(m[1])) {
+    const args = obj(m[2]);
+    if (args) return { name: m[1], args };
+  }
+
+  // 3. a bare {"name": "read", "arguments": {...}}
+  if (s.startsWith('{')) {
+    const j = obj(s);
+    if (j && known.has(j.name)) {
+      const args = typeof j.arguments === 'string' ? obj(j.arguments) : j.arguments;
+      if (args && typeof args === 'object') return { name: j.name, args };
+    }
+  }
+  return null;
+}
+
+const asCall = ({ name, args }) => ({
+  id: `textcall_${Math.random().toString(36).slice(2, 10)}`,
+  type: 'function',
+  function: { name, arguments: JSON.stringify(args || {}) },
+});
+
 // ------------------------------------------------- model provisioning ----
 // `helper "question"` should not require a hand-started llama-server: find the
 // binary, pick or fetch a model, start it detached, and reuse it next time.
@@ -1382,9 +1432,8 @@ async function complete(messages, signal, render, { allowTools = true } = {}) {
     const j = await res.json();
     const m = j.choices?.[0]?.message || {};
     if (m.reasoning_content) render.think(m.reasoning_content);
-    if (m.content) render.answer(m.content);
-    if (CFG.stats) showStats(j.usage);
-    return { content: m.content || '', toolCalls: m.tool_calls || [] };
+    const textCall = (m.tool_calls || []).length ? null : parseTextCall(m.content || '');
+    if (textCall) return { content: '', toolCalls: [asCall(textCall)] };
   }
 
   let buf = '', content = '';
@@ -1392,7 +1441,18 @@ async function complete(messages, signal, render, { allowTools = true } = {}) {
   // small reasoning models put their chain of thought in reasoning_content;
   // it is shown in the panel and never stored in history
   const think = (t) => render.think(t);
-  const answer = (t) => { content += t; render.answer(t); };
+  // Some models print the call as *text* — <function name="read"><param…> —
+  // instead of using tool_calls. Hold the answer's first few characters back so
+  // a textual call can be turned into a real one instead of being printed.
+  let held = '', holding = true;
+  const flush = () => { if (held) { content += held; render.answer(held); held = ''; } holding = false; };
+  const answer = (t) => {
+    if (!holding) { content += t; render.answer(t); return; }
+    held += t;
+    if (/^\s*$/.test(held)) return;                  // whitespace so far
+    if (!/^\s*[<{]/.test(held)) return flush();      // prose: stream it now
+    if (held.length > 700) return flush();           // far too long to be a call
+  };
   for await (const chunk of res.body) {
     buf += Buffer.from(chunk).toString('utf8');
     let nl;
@@ -1422,6 +1482,11 @@ async function complete(messages, signal, render, { allowTools = true } = {}) {
     }
   }
   const toolCalls = calls.filter(Boolean);
+  if (holding) {
+    const textCall = toolCalls.length ? null : parseTextCall(held);
+    if (textCall) return { content: '', toolCalls: [asCall(textCall)] };
+    flush();
+  }
   return { content, toolCalls };
 }
 

@@ -52,6 +52,15 @@ http.createServer(async (req, res) => {
       delta(res, { tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'read', arguments: '{"path":' } }] });
     } else if (user.includes('unknown tool')) {
       delta(res, { tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'shell', arguments: '{"cmd":"rm -rf /"}' } }] });
+    } else if (user.includes('xml call')) {
+      // a model that writes the call as text instead of using tool_calls
+      delta(res, { content: '<function name="read"><param name="path">.</param><param name="limit">3</param></function>' });
+    } else if (user.includes('tag call')) {
+      delta(res, { content: '<function=read{"path":"."}</function>' });
+    } else if (user.includes('json call')) {
+      delta(res, { content: '{"name":"read","arguments":{"path":"."}}' });
+    } else if (user.includes('prose json')) {
+      delta(res, { content: '{"a":1} is just a JSON object, not a call' });
     } else if (user.includes('big read')) {
       delta(res, { tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'read', arguments: '{"path":"helper.mjs","limit":250}' } }] });
     } else if (!user.includes('empty')) {
@@ -86,6 +95,25 @@ has "object arguments: read ran" "tools=1 first=dir ." "$out"
 out=$(run "use bad json"); c=$?
 [ "$c" = 0 ] && ok "malformed JSON args: exit 0" || no "malformed args: exit" "got $c"
 has "malformed JSON args: still answers" "tools=1" "$out"
+
+out=$(run "use xml call"); c=$?
+[ "$c" = 0 ] && ok "call written as XML text: exit 0" || no "XML text call: exit" "got $c"
+has   "call written as XML text: the read ran" "tools=1 first=dir ." "$out"
+hasnt "call written as XML text: markup never printed" "<function" "$out"
+
+out=$(run "use tag call"); c=$?
+[ "$c" = 0 ] && ok "<function=name>{json}: exit 0" || no "tag call: exit" "got $c"
+has   "<function=name>{json}: the read ran" "tools=1 first=dir ." "$out"
+hasnt "<function=name>{json}: markup never printed" "<function" "$out"
+
+out=$(run "use json call"); c=$?
+[ "$c" = 0 ] && ok "bare JSON call object: exit 0" || no "json call: exit" "got $c"
+has   "bare JSON call object: the read ran" "tools=1 first=dir ." "$out"
+hasnt "bare JSON call object: not echoed raw" '{"name":"read"' "$out"
+
+out=$(run "prose json answer"); c=$?
+[ "$c" = 0 ] && ok "answer starting with {: exit 0" || no "prose json: exit" "got $c"
+has   "answer starting with {: printed as written" "is just a JSON object" "$out"
 
 out=$(run "use unknown tool"); c=$?
 [ "$c" = 0 ] && ok "unknown tool: exit 0" || no "unknown tool: exit" "got $c"
