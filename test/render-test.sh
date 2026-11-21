@@ -27,7 +27,15 @@ ok('heading styled', head.includes('Title') && head.includes('\x1b['), JSON.stri
 const st1 = fresh();
 const fence = s('```nix', st1);
 ok('fence line dimmed + toggles state', fence.includes('\x1b[2m') && st1.inFence === true, JSON.stringify(fence));
-ok('markdown inside fence untouched', s('a **b** `c`', st1) === 'a **b** `c`');
+ok('fence opens with a rail + language, no backticks', /\x1b\[2m┌─/.test(fence) && fence.includes('nix') && !fence.includes('`'), JSON.stringify(fence));
+const inside = s('a **b** `c`', st1);
+ok('markdown inside fence untouched', inside.replace(/\x1b\[[0-9;]*m/g, '').replace(/^│ /, '') === 'a **b** `c`' && !/\x1b\[[134]m/.test(inside), JSON.stringify(inside));
+const rail = s('    if (x) y();', st1);
+ok('code keeps its indent after the rail', rail.replace(/\x1b\[[0-9;]*m/g, '') === '    │ if (x) y();', JSON.stringify(rail));
+ok('blank line inside a block keeps the rail', s('', st1).includes('│'));
+const close = s('```', st1);
+ok('fence closes with a rail and clears state', /\x1b\[2m└─/.test(close) && st1.inFence === false && !close.includes('`'), JSON.stringify(close));
+ok('prose after the block is styled again', s('**b**', st1).includes('\x1b[1mb'));
 ok('link text underlined', s('see [docs](https://nix.dev)').includes('\x1b[4mdocs\x1b[24m'));
 ok('** inside code stays literal', s('`**not bold**`').includes('**not bold**'));
 const nested = s('**Sci-fi hit *The Eternaut* on Netflix** (viral starfish)');
@@ -42,7 +50,7 @@ EOF
 out=$(FORCE_COLOR=1 JERRITO_FILE="$H" node /tmp/md-test.mjs 2>&1); echo "$out"
 pass=$((pass + $(printf '%s\n' "$out" | grep -c '^PASS')))
 fail=$((fail + $(printf '%s\n' "$out" | grep -c '^FAIL')))
-if WITHOUT_COLOR=1 JERRITO_FILE="$H" node -e 'const { styleMdLine } = await import(process.env.JERRITO_FILE); process.exit(styleMdLine("**x**", { inFence: false }) === "**x**" ? 0 : 1)'; then
+if WITHOUT_COLOR=1 JERRITO_FILE="$H" node -e 'const { styleMdLine } = await import(process.env.JERRITO_FILE); const st = { inFence: false }; process.exit(styleMdLine("**x**", { inFence: false }) === "**x**" && styleMdLine("```nix", st) === "```nix" && styleMdLine("┌─", st) === "┌─" ? 0 : 1)'; then
   ok "no escape codes without colour"
 else
   no "no escape codes without colour"
@@ -80,6 +88,8 @@ http.createServer(async (req, res) => {
     args.forEach((a, i) => delta(res, { tool_calls: [{ index: i, id: 'c' + i, type: 'function', function: { name: 'read', arguments: JSON.stringify(a) } }] }));
   } else if (user.includes('empty')) {
     // tool call, then nothing: exercises the empty-response path while a panel is on screen
+  } else if (user.includes('code block')) {
+    for (const line of ['Try this:', '```sh', 'nix develop -c j "q"', '```']) delta(res, { content: line + '\n' });
   } else {
     for (const line of ['Here is **bold** and `code`.', '- a [link](https://nix.dev) item']) delta(res, { content: line + '\n' });
   }
@@ -127,6 +137,14 @@ hasnt "pipe + FORCE_COLOR: no cursor erasing" "$(printf '\033[J')" "$pipe_forced
 
 has   "pty: footer shows tok/s" "tok/s" "$pty_out"
 hasnt "pipe: no footer in piped output" "tok/s" "$pipe_out"
+
+# a fenced block must render as a rail on a TTY and stay literal markdown in a pipe
+code_out=$(script -qec "env JERRITO_BASE_URL=http://127.0.0.1:$MP/v1 node $H 'a code block'" /dev/null 2>&1 | tr -d '\r')
+code_pipe=$(env JERRITO_BASE_URL=http://127.0.0.1:$MP/v1 node "$H" 'a code block' 2>&1)
+has   "pty: the closing fence becomes a rail" "└─" "$code_out"
+hasnt "pty: no literal fence markers in the answer" '```' "$code_out"
+grep -q '│ .*nix develop -c j' <<< "$code_out" && ok "pty: code block renders on a rail" || no "pty: code block renders on a rail" "$(printf %s "$code_out" | tail -c 200)"
+has   "pipe: code block stays raw markdown" '```sh' "$code_pipe"
 
 empty_out=$(script -qec "env JERRITO_BASE_URL=http://127.0.0.1:$MP/v1 node $H 'empty answer'" /dev/null 2>&1 | tr -d '\r')
 case "$empty_out" in

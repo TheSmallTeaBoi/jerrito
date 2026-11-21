@@ -1291,15 +1291,38 @@ const mdItalic = (s) => (COLOR ? `\x1b[3m${s}\x1b[23m` : s);
 const mdUnder = (s) => (COLOR ? `\x1b[4m${s}\x1b[24m` : s);
 const mdCode = (s) => (COLOR ? `\x1b[36m${s}\x1b[39m` : s);
 const mdDim = (s) => (COLOR ? `\x1b[2m${s}\x1b[22m` : s);
+const mdLang = (s) => (COLOR ? `\x1b[2;36m${s}\x1b[22;39m` : s);
+
+/**
+ * fenced code block -> a dim rail with the language as a title, so the ```
+ * markers vanish and the code reads as one block instead of loose prose.
+ * Returns null when the line is not a fence.
+ */
+function styleFence(line, state) {
+    if (/^\s*```/.test(line)) {
+        const lead = (line.match(/^\s*/) || [''])[0];
+        if (state.inFence) {
+            state.inFence = false;
+            state.lang = '';
+            return mdDim(lead + '└─');
+        }
+        const lang = ((/^\s*```+\s*([^\s`]*)/.exec(line) || [])[1] || '').toLowerCase();
+        state.inFence = true;
+        state.lang = lang;
+        return mdDim(lead + '┌─') + (lang ? ' ' + mdLang(lang) : '');
+    }
+    if (!state.inFence) return null;
+    const lead = (line.match(/^\s*/) || [''])[0];
+    const rest = line.slice(lead.length);
+    // blank lines inside a block keep the rail, so the block stays one shape
+    return rest ? lead + mdDim('│ ') + rest : lead + mdDim('│');
+}
 
 /** one line of model markdown -> styled line; no-op when not a TTY */
 function styleMdLine(line, state) {
     if (!COLOR) return line;
-    if (/^\s*```/.test(line)) {
-        state.inFence = !state.inFence;
-        return mdDim(line);
-    }
-    if (state.inFence) return line;
+    const fenced = styleFence(line, state);
+    if (fenced !== null) return fenced;
 
     // inline first, on the raw text: inserting escapes earlier would let the
     // link/bold regexes match their own ANSI sequences

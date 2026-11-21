@@ -163,6 +163,11 @@ markdown; that is asserted in `render-test`). Data sources:
   erase wiped it.
 - **Markdown** → `**bold *italic* x**` printed raw markers; `\u0001` code
   placeholders leaked inside bold spans.
+- **Code blocks printed as-is** → fenced blocks used to come out as literal
+  triple-backtick lines with the code indistinguishable from prose.
+  `styleFence()` now drops the backticks and draws a dim rail (`┌─ lang` /
+  `│ code` / `└─`, indent kept, blank lines keep the rail) — decoration only, so
+  piped output is still the raw fence and `render-test` asserts both sides.
 
 ## Tools (five)
 
@@ -202,7 +207,7 @@ returning navigation as content.
 | `jerrito-tests` | tool shapes, error paths, offline search parsing, cold/warm start, `--status`/`--stop`, symlink install, REPL |
 | `prompt-test` | the prompt: modes, freshness, non-persistence, size, source identity |
 | `agent-tests` | tool loop vs a scripted server: parallel calls, bad args, unknown tool, budget-forced answer, empty response |
-| `render-test` | markdown styling + panel collapse through a real pty (`script`) |
+| `render-test` | markdown styling (incl. fenced code rails) + panel collapse through a real pty (`script`) |
 | `fetch-test` | `web_fetch` extraction fixtures; SearXNG / 4get parsing and fallbacks |
 | `instances-test` | 4get instance auto-update: finder, cache TTL, overrides, self-heal, rotation |
 | `concurrency-test` | two simultaneous cold starts, busy-server reuse |
