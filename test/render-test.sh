@@ -154,5 +154,30 @@ esac
 has   "pty: empty answer still collapses the panel" "▸" "$empty_out"
 
 echo
+echo
+echo "== footer: parallel tool calls count once =="
+cat > /tmp/footer-test.mjs <<'EOF'
+const { makeTurnRenderer } = await import(process.env.JERRITO_FILE);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const r = makeTurnRenderer();
+r.usage({ tok: 120, ms: 1000 });
+// two searches at the same time: 400 ms of wall time, 800 ms if summed
+const a = r.tool('web_search', { query: 'alpha' });
+const b = r.tool('web_search', { query: 'beta' });
+await sleep(400);
+r.toolResult('1) alpha', a);
+r.toolResult('1) beta', b);
+// then one on its own
+const c = r.tool('web_fetch', { url: 'https://x.example' });
+await sleep(100);
+r.toolResult('# fetched', c);
+r.finish();
+r.footer();
+EOF
+out=$(script -qec "env JERRITO_FILE=$H node /tmp/footer-test.mjs" /dev/null 2>&1 | tr -d '\r')
+grep -qE 'search 0\.[45]s' <<< "$out" && ok "footer: overlapping searches count once (wall time)" || no "footer: overlapping searches" "$(grep -o 'search [0-9.]*s' <<< "$out")"
+grep -qE 'search 0\.(8|9)s' <<< "$out" && no "footer: overlapping calls are not summed" "$(grep -o 'search [0-9.]*s' <<< "$out")" || ok "footer: overlapping calls are not summed"
+grep -qE 'fetch 0\.1s' <<< "$out" && ok "footer: a separate tool keeps its own time" || no "footer: separate tool time" "$(grep -o 'fetch [0-9.]*s' <<< "$out")"
+
 echo "== summary: $pass passed, $fail failed =="
 [ "$fail" = 0 ]

@@ -38,14 +38,15 @@ const lite = `<html><body><table>
 <tr><td>3.&nbsp;</td><td><a rel="nofollow" href="https://example.com/dup" class='result-link'>Duplicate again</a></td></tr>
 <tr><td>&nbsp;</td><td class='result-snippet'>dupe</td></tr>
 </table></body></html>`;
-globalThis.fetch = async (url, opts) => String(url).includes('duckduckgo')
+globalThis.fetch = async (url) => String(url).includes('duckduckgo')
   ? new Response(lite, { status: 200, headers: { 'content-type': 'text/html' } })
-  : realFetch(url, opts);
+  // any other provider is offline here: the parse test must not touch the network
+  : Promise.reject(new Error('offline test: ' + String(url).slice(0, 40)));
 const { webSearch } = await import(process.env.JERRITO_FILE);
-const out = await webSearch('anything');
+const out = await webSearch('nix dev');
 console.log(out);
 EOF
-out=$(JERRITO_4GET_URL=off JERRITO_FILE="$H" node /tmp/search-offline.mjs 2>&1)
+out=$(JERRITO_4GET_URL=off JERRITO_SEARCH_HEDGE=0 JERRITO_FILE="$H" node /tmp/search-offline.mjs 2>&1)
 has "search parses title" "1) Nix dev" "$out"
 has "search decodes the uddg redirect" "https://nix.dev/" "$out"
 has "search decodes entities" "A tutorial site & reference." "$out"
@@ -55,13 +56,14 @@ dupes=$(printf %s "$out" | grep -c "example.com/dup")
 cat > /tmp/search-blocked.mjs <<'EOF'
 const realFetch = globalThis.fetch;
 const blocked = (u) => /duckduckgo|search\.brave\.com/.test(String(u));
-globalThis.fetch = async (url, opts) => blocked(url)
+globalThis.fetch = async (url) => blocked(url)
   ? new Response("<html><body><script src=\"/anomaly.js\"></script></body></html>", { status: 202, headers: { "content-type": "text/html" } })
-  : realFetch(url, opts);
+  // bing is not part of this fixture: offline, like the rest
+  : Promise.reject(new Error('offline test: ' + String(url).slice(0, 40)));
 const { webSearch } = await import(process.env.JERRITO_FILE);
 console.log(await webSearch("x"));
 EOF
-out=$(JERRITO_4GET_URL=off JERRITO_FILE="$H" node /tmp/search-blocked.mjs 2>&1)
+out=$(JERRITO_4GET_URL=off JERRITO_SEARCH_HEDGE=0 JERRITO_FILE="$H" node /tmp/search-blocked.mjs 2>&1)
 has "search says rate-limited instead of no-results" "rate-limited" "$out"
 out=$(node "$H" -t web_search "gdb reverse debugging" 2>&1)
 if printf %s "$out" | grep -q "^No results for"; then

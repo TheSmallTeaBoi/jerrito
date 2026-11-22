@@ -41,7 +41,9 @@ globalThis.fetch = async (url) => {
   if (u.includes('/api/v1/web')) {
     if (u.startsWith('https://dead.example')) throw new Error('connect ECONNREFUSED');
     if (u.startsWith('https://live.example')) return result('From live');
-    if (u.startsWith('https://other.example')) return result('From other');
+    // slow on purpose: instances race, so the test can still tell which one
+    // produced the rows
+    if (u.startsWith('https://other.example')) { await new Promise((r) => setTimeout(r, 30)); return result('From other'); }
   }
   throw new Error('unexpected url ' + u);
 };

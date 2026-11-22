@@ -52,6 +52,9 @@ http.createServer(async (req, res) => {
       delta(res, { tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'read', arguments: '{"path":' } }] });
     } else if (user.includes('unknown tool')) {
       delta(res, { tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'shell', arguments: '{"cmd":"rm -rf /"}' } }] });
+    } else if (user.includes('two text calls')) {
+      // two calls written as text in one message: both must run, in one batch
+      delta(res, { content: '<function=read{"path":"."}</function>\n<function=read{"path":"jerrito.mjs","limit":3}</function>' });
     } else if (user.includes('xml call')) {
       // a model that writes the call as text instead of using tool_calls
       delta(res, { content: '<function name="read"><param name="path">.</param><param name="limit">3</param></function>' });
@@ -63,6 +66,10 @@ http.createServer(async (req, res) => {
       delta(res, { content: '{"a":1} is just a JSON object, not a call' });
     } else if (user.includes('big read')) {
       delta(res, { tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'read', arguments: '{"path":"jerrito.mjs","limit":250}' } }] });
+    } else if (user.includes('two searches')) {
+      // two searches in one turn: they must run at the same time
+      delta(res, { tool_calls: [{ index: 0, id: 's0', type: 'function', function: { name: 'web_search', arguments: '{"query":"alpha"}' } }] });
+      delta(res, { tool_calls: [{ index: 1, id: 's1', type: 'function', function: { name: 'web_search', arguments: '{"query":"beta"}' } }] });
     } else if (!user.includes('empty')) {
       delta(res, { content: 'plain answer' });
     }
@@ -100,6 +107,11 @@ out=$(run "use xml call"); c=$?
 [ "$c" = 0 ] && ok "call written as XML text: exit 0" || no "XML text call: exit" "got $c"
 has   "call written as XML text: the read ran" "tools=1 first=dir ." "$out"
 hasnt "call written as XML text: markup never printed" "<function" "$out"
+
+out=$(run "two text calls"); c=$?
+[ "$c" = 0 ] && ok "two calls written as text: exit 0" || no "two text calls: exit" "got $c"
+has   "two calls written as text: both ran" "tools=2" "$out"
+hasnt "two calls written as text: markup never printed" "<function" "$out"
 
 out=$(run "use tag call"); c=$?
 [ "$c" = 0 ] && ok "<function=name>{json}: exit 0" || no "tag call: exit" "got $c"
@@ -141,6 +153,44 @@ hasnt "tool-loop: no 'stopped' shrug" "stopped: max tool steps" "$out"
 reqs=$(grep -c . /tmp/mock-agent.log 2>/dev/null || echo 0)
 [ "$reqs" = 3 ] && ok "tool-loop: 2 tool rounds + 1 forced completion" || no "tool-loop: completion count" "got $reqs"
 has   "tool-loop: forced step ran without tools" "tools=no" "$(tail -1 /tmp/mock-agent.log)"
+
+echo
+echo "== parallel tool calls =="
+# a slow fake 4get: it records when each search reaches it. Two searches that
+# run in parallel arrive within milliseconds of each other; queued ones are
+# separated by the full answer time.
+FG_PORT=$(node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{const p=s.address().port;console.log(p);s.close()})')
+FG_LOG=/tmp/twosearch-times; : > "$FG_LOG"
+cat > /tmp/mock-4get.mjs <<'FG'
+import http from 'node:http';
+import { appendFileSync } from 'node:fs';
+http.createServer((req, res) => {
+  appendFileSync(process.env.FG_LOG, Date.now() + '\n');
+  // the title echoes the query, so the relevance check keeps the results
+  const q = new URL(req.url, 'http://127.0.0.1').searchParams.get('s') || '';
+  setTimeout(() => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', web: [{ title: 'result for ' + q, description: 'd', url: 'https://four.example/' + Date.now() }] }));
+  }, 300);
+}).listen(Number(process.env.FG_PORT), '127.0.0.1');
+FG
+FG_PORT="$FG_PORT" FG_LOG="$FG_LOG" node /tmp/mock-4get.mjs & FG=$!
+trap 'kill $MOCK $FG 2>/dev/null' EXIT
+for i in $(seq 1 50); do curl -sf "http://127.0.0.1:$FG_PORT/api/v1/web?s=x&scraper=ddg" -o /dev/null && break; sleep 0.2; done; : > "$FG_LOG"
+
+t0=$(date +%s%N)
+out=$(EXTRA="JERRITO_4GET_URL=http://127.0.0.1:$FG_PORT JERRITO_BING=off JERRITO_SEARCH_HEDGE=5000" run "two searches"); c=$?
+t1=$(date +%s%N); two_ms=$(( (t1-t0)/1000000 ))
+[ "$c" = 0 ] && ok "two searches: exit 0" || no "two searches: exit" "got $c"
+has "two searches: both tool results fed back" "tools=2" "$out"
+n1=$(sed -n 1p "$FG_LOG"); n2=$(sed -n 2p "$FG_LOG")
+if [ -n "$n1" ] && [ -n "$n2" ]; then
+  gap=$(( n2 > n1 ? n2 - n1 : n1 - n2 ))
+  [ "$gap" -lt 200 ] && ok "two searches: reached the provider together (${gap}ms apart)" || no "two searches: parallel" "${gap}ms apart"
+else
+  no "two searches: both requests seen" "log: $(cat "$FG_LOG" | tr '\n' ' ')"
+fi
+[ "$two_ms" -lt 1200 ] && ok "two searches: one round trip, not two (${two_ms}ms total)" || no "two searches: one round trip" "${two_ms}ms"
 
 echo
 echo "== summary: $pass passed, $fail failed =="
