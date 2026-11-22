@@ -76,8 +76,44 @@ out=$(node "$H" -t web_fetch https://nix.dev/ 2>&1); has "web_fetch returns mark
 out=$(node "$H" -t web_fetch https://nix.dev/manual/nix/2.35.6/release-notes/ 2>&1); has "web_fetch 404 is a clean message" "HTTP 404" "$out"
 out=$(node "$H" -t web_fetch https://nonexistent-host-xyz-12345.example 2>&1); has "web_fetch DNS failure is a clean message" "ENOTFOUND" "$out"
 out=$(node "$H" -t read . 2>&1); has "read lists dir with sizes" "jerrito.mjs  " "$out"
-out=$(node "$H" -t read jerrito.mjs 2>&1); has "read file is line-numbered" "1| #!/usr/bin/env node" "$out"
-out=$(JERRITO_READ_LINES=4 node "$H" -t read jerrito.mjs 2>&1); has "read truncation hint" "continue with offset=" "$out"
+out=$(node "$H" -t read test/run.sh 2>&1); has "read file is line-numbered" "1| #!/usr/bin/env bash" "$out"
+seq 1 120 > .read-truncate-test.md
+out=$(JERRITO_READ_LINES=4 node "$H" -t read .read-truncate-test.md 2>&1); has "read truncation hint" "continue with offset=" "$out"
+rm -f .read-truncate-test.md
+cat > /tmp/read-big.mjs <<'EOF'
+const { readTool } = await import(process.env.JERRITO_FILE);
+// whole-file read of a big file: outline instead of the body
+const whole = readTool('jerrito.mjs');
+console.log(JSON.stringify({ outline: /^outline /.test(whole), withheld: /body withheld/.test(whole), body: /^file /.test(whole) }));
+// explicit offset is deliberate paging: the body comes
+const ranged = readTool('jerrito.mjs', 2700, 100);
+console.log(JSON.stringify({ body: /^file /.test(ranged) }));
+EOF
+out=$(JERRITO_FILE="$H" node /tmp/read-big.mjs 2>&1)
+case "$out" in
+  *'"outline":true'*'"withheld":true'*'"body":false'*'"body":true'*) ok "big whole-file read returns outline, body withheld; offset read gives body";;
+  *) no "big-file read withholding" "$out";;
+esac
+# outline: symbol index instead of the file body (code via ctags, md via headings)
+if command -v ctags >/dev/null 2>&1; then
+  out=$(JERRITO_TOOL_ARGS=outline node "$H" -t read jerrito.mjs 2>&1)
+  has "outline: code file lists symbols" "function  systemPrompt" "$out"
+  has "outline: header counts lines and symbols" "outline jerrito.mjs (" "$out"
+  out=$(JERRITO_TOOL_ARGS=outline node "$H" -t read README.md 2>&1)
+  has "outline: markdown headings with line numbers" "h2  " "$out"
+  printf '## real heading\n```sh\n## not a heading, inside a fence\n```\n' > .outline-md-test.md
+  out=$(JERRITO_TOOL_ARGS=outline node "$H" -t read .outline-md-test.md 2>&1)
+  has "outline: real md heading found" "1  h2" "$out"
+  hasnt "outline: heading inside fence skipped" "not a heading" "$out"
+  rm -f .outline-md-test.md
+  out=$(JERRITO_TOOL_ARGS=outline node "$H" -t read flake.nix 2>&1)
+  has "outline: no-parser degrades honestly" "no symbols found" "$out"
+  nodeBin=$(command -v node)
+  out=$(PATH="/usr/bin:/bin:${nodeBin%/*}" JERRITO_TOOL_ARGS=outline node "$H" -t read jerrito.mjs 2>&1)
+  has "outline: still works without ctags (heuristic)" "function  systemPrompt" "$out"
+else
+  echo "SKIP  outline tests (no ctags on PATH — use: nix develop -c ./test/jerrito-tests.sh)"
+fi
 out=$(node "$H" -t read ../../etc/passwd 2>&1); c=$?
 [ "$c" = 1 ] && has "read blocks path escape" "escapes project root" "$out" || no "read escape exit code" "got $c"
 out=$(node "$H" -t read /dev/zero 2>&1); has "read blocks device files" "escapes project root" "$out"

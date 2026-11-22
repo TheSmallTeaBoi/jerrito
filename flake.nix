@@ -28,6 +28,7 @@
             pkgs.nodejs_24
             (llama pkgs cpu)
             pkgs.git
+            pkgs.universal-ctags   # read outline=true: symbol index for code files
           ];
           # HELPER_PROG is what usage/errors call themselves; the wrapped node
           # cannot see the name it was invoked as otherwise
@@ -42,6 +43,7 @@
             (llama pkgs false)
             curl
             git
+            universal-ctags   # read outline=true
           ];
 
           shellHook = ''

@@ -45,9 +45,9 @@ let CFG = {
     modelFile: process.env.JERRITO_MODEL_FILE || '',
     key: process.env.JERRITO_API_KEY || process.env.OPENAI_API_KEY || 'none',
     temp: num(process.env.JERRITO_TEMP, 0.2),
-    maxTokens: num(process.env.JERRITO_MAX_TOKENS, 2048),
+    maxTokens: num(process.env.JERRITO_MAX_TOKENS, 4096),
     stats: process.env.JERRITO_STATS === '1',
-    steps: num(process.env.JERRITO_STEPS, 8),
+    steps: num(process.env.JERRITO_STEPS, 20),
     chars: num(process.env.JERRITO_MAX_CHARS, 24000),   // history budget (chars)
     maxResults: num(process.env.JERRITO_SEARCH_RESULTS, 6),
     fetchChars: num(process.env.JERRITO_FETCH_CHARS, 6000),
@@ -865,7 +865,105 @@ function manTool(page, section) {
     return clean;
 }
 
-function readTool(rel, offset, limit) {
+/** true if `cmd` is runnable (like `command -v`), cached per name */
+const _cmdCache = new Map();
+function commandExists(cmd) {
+    if (_cmdCache.has(cmd)) return _cmdCache.get(cmd);
+    let ok = false;
+    try { execFileSync(cmd, ['--version'], { timeout: 4000, stdio: 'ignore' }); ok = true; } catch { ok = false; }
+    _cmdCache.set(cmd, ok);
+    return ok;
+}
+
+/** format outline rows (tab-separated line\tkind\tname) within a char cap */
+function fmtOutlineRows(rows, width, cap) {
+    const lines = [];
+    let bytes = 0;
+    for (const r of rows) {
+        const [num, kind, rest] = r.split('\t');
+        const line = `${String(num).padStart(width)}  ${kind.padEnd(10)}${rest.length > 90 ? rest.slice(0, 89) + '…' : rest}`;
+        if (bytes + line.length + 1 > cap) break;
+        lines.push(line); bytes += line.length + 1;
+    }
+    return lines.join('\n') + (lines.length < rows.length ? `\n[…${rows.length - lines.length} more symbols]` : '');
+}
+
+/** conservative no-dependency outline: declarations we can see with plain
+ *  regexes. Coarser than ctags (no signatures), but it cannot stall mid-file,
+ *  which the ctags JavaScript parser demonstrably can on regex-heavy code. */
+function heuristicOutline(all) {
+    const rows = [];
+    for (let i = 0; i < all.length && rows.length < 400; i++) {
+        const line = all[i];
+        let m, kind = null, name = null;
+        if ((m = /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/.exec(line))) { kind = 'function'; name = m[1]; }
+        else if ((m = /^\s*(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/.exec(line))) { kind = 'class'; name = m[1]; }
+        else if ((m = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function|\([^;=]*\)\s*=>)/.exec(line))) { kind = 'function'; name = m[1]; }
+        else if ((m = /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/.exec(line))) { kind = 'constant'; name = m[1]; }
+        else if ((m = /^\s*(?:def|fn|func|sub|async\s+def)\s+([A-Za-z_$][\w$]*)/.exec(line))) { kind = 'def'; name = m[1]; }
+        else if ((m = /^\s+([A-Za-z_$][\w$]*)\s*\([^;()]*\)\s*\{\s*$/.exec(line)) && !/^(if|for|while|switch|catch|function|return)$/.test(m[1])) { kind = 'method'; name = m[1]; }
+        if (name) rows.push(`${i + 1}\t${kind}\t${name}`);
+    }
+    return rows;
+}
+
+/** symbol index for one file: universal-ctags for code (line, kind, name,
+ *  signature), our own heading walker for Markdown (fence-safe). Falls back
+ *  to heuristicOutline when ctags is missing, has no parser for the language
+ *  or visibly stalled (last symbol far above EOF) — and must never look like
+ *  a failed read of the file itself. */
+function outlineTool(abs, rel, all) {
+    const total = all.length;
+    const cap = Math.min(8000, Math.max(2000, Math.floor(CFG.chars / 2)));
+    let rows = [];
+    let approx = false;
+
+    if (/\.m(ark)?d(own)?$/i.test(rel)) {
+        // markdown: headings outside fenced code blocks
+        let fence = null;
+        for (let i = 0; i < total && rows.length < 400; i++) {
+            const line = all[i];
+            const fm = /^(\s*)(`{3,}|~{3,})/.exec(line);
+            if (fm) { if (!fence) fence = fm[2]; else if (fm[2].startsWith(fence)) fence = null; continue; }
+            if (fence) continue;
+            const h = /^(#{1,6})\s+(.*\S)\s*#*\s*$/.exec(line);
+            if (h) rows.push(`${i + 1}\t${'h' + h[1].length}\t${h[2].trim()}`);
+        }
+    } else {
+        if (commandExists('ctags')) {
+            let out = '';
+            try {
+                // no shell, path as one arg; -x is the plain listing, tab-separated
+                // via --_xformat; -u keeps source order instead of name sort
+                out = execFileSync('ctags', ['-x', '-u', '--_xformat=%N\t%K\t%n\t%S', abs],
+                    { encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] });
+            } catch { out = ''; }
+            const NOISE = new Set(['property', 'field', 'member', 'label', 'enumerator', 'section']);
+            for (const ln of out.split('\n')) {
+                const [name, kindRaw, num, sig] = ln.split('\t');
+                const kind = String(kindRaw || '').toLowerCase();
+                if (!name || !kind || !/^\d+$/.test(num || '')) continue;
+                if (NOISE.has(kind) || /^(ANONYMOUS|_)/.test(name)) continue;
+                if (rows.length >= 400) break;
+                const s = (sig || '').trim();
+                rows.push(`${num}\t${kind}\t${name}${s && s !== '()' && s !== '-' ? ' ' + s : ''}`);
+            }
+            // a parser that stopped far above EOF (the JS one stalls on some
+            // regex-heavy files) is worse than our heuristic: replace it
+            const last = rows.length ? +rows[rows.length - 1].split('\t')[0] : 0;
+            approx = rows.length === 0 || last < all.length - 5;
+            if (approx) rows.length = 0;
+        } else approx = true;
+        if (approx) rows.push(...heuristicOutline(all));
+    }
+
+    if (!rows.length) return `outline ${rel}: no symbols found (${total} lines) — read it directly instead.`;
+    const width = String(Math.max(...rows.map((r) => +r.split('\t')[0]))).length;
+    if (approx) return `outline ${rel} (${total} lines, approximate — ctags could not parse it)\n` + fmtOutlineRows(rows, width, cap);
+    return `outline ${rel} (${total} lines, ${rows.length} symbol${rows.length === 1 ? '' : 's'})\n` + fmtOutlineRows(rows, width, cap);
+}
+
+function readTool(rel, offset, limit, outline) {
     const abs = resolveIn(rel);
     const st = statSync(abs);
 
@@ -886,6 +984,17 @@ function readTool(rel, offset, limit) {
     const buf = readFileSync(abs);
     if (buf.subarray(0, 4096).includes(0)) return 'Binary file, not readable as text.';
     const all = buf.toString('utf8').split('\n');
+
+    if (outline) return outlineTool(abs, path.relative(ROOT, abs) || rel, all);
+
+    // a 2 B model will page a 2700-line file in 250-line chunks even when told
+    // not to, so a whole-file read of a big file gets the symbol index instead
+    // of the body — it cannot pay for what it is not given
+    const BIG = Math.max(CFG.readLines, 250) + 20;
+    if (!Number(offset) && all.length > BIG) {
+        return outlineTool(abs, path.relative(ROOT, abs) || rel, all)
+            + `\n[body withheld: this file has ${all.length} lines — read the range you need with offset/limit]`;
+    }
     const start = Math.max(1, Number(offset) || 1);
     const max = Math.min(Number(limit) || CFG.readLines, 1500);
     const slice = all.slice(start - 1, start - 1 + max);
@@ -912,13 +1021,14 @@ const TOOLS = [
         type: 'function',
         function: {
             name: 'read',
-            description: 'Read a file, or list a directory, inside the current project. Use this for every question about local files or code.',
+            description: 'Read a file, or list a directory, inside the current project. Use this for every question about local files or code. For a file you have not seen, call with outline:true FIRST: you get a symbol/section index with line numbers instead of the body, then read only the range you need with offset/limit.',
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: 'path relative to project root' },
                     offset: { type: 'integer', description: 'first line, 1-based' },
                     limit: { type: 'integer', description: 'max lines (default 250)' },
+                    outline: { type: 'boolean', description: 'return a symbol index (functions, classes, Markdown headings — each with its line number) instead of the file body. Cheap way to see a file\'s structure before reading a range.' },
                 },
                 required: ['path'],
             },
@@ -989,7 +1099,7 @@ async function runTool(name, args) {
         case 'web_fetch':
             if (!args.url) return { text: 'web_fetch needs a "url" argument.', hint: '(no url)' };
             return { text: await webFetch(String(args.url)), hint: args.url };
-        case 'read': return { text: readTool(String(args.path ?? '.'), args.offset, args.limit), hint: args.path };
+        case 'read': return { text: readTool(String(args.path ?? '.'), args.offset, args.limit, Boolean(args.outline)), hint: args.path };
         case 'grep': return { text: grepTool(args.pattern, args.path, args.glob), hint: args.pattern };
         case 'man': return { text: manTool(args.page, args.section), hint: args.page };
         default: return { text: `Unknown tool "${name}". Available: read, grep, man, web_search, web_fetch.`, hint: name };
@@ -1701,46 +1811,68 @@ const mdCode = (s) => (COLOR ? `\x1b[36m${s}\x1b[39m` : s);
 const mdDim = (s) => (COLOR ? `\x1b[2m${s}\x1b[22m` : s);
 const mdLang = (s) => (COLOR ? `\x1b[2;36m${s}\x1b[22;39m` : s);
 
+// double-width (CJK, most emoji) and zero-width (combining marks, joiners)
+// ranges: only used for table padding, where a miscount breaks the grid
+const WIDE_CH = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA70}-\u{1FAFF}]/u;
+const ZERO_CH = /[\u0300-\u036F\u200B-\u200F\uFE00-\uFE0F\u{1F3FB}-\u{1F3FF}]/u;
+
+/** visible width of a styled string: escapes print nothing, emoji twice */
+const visLen = (s) => {
+    let n = 0;
+    for (const ch of s.replace(/\x1b\[[0-9;]*m/g, '')) {
+        if (ZERO_CH.test(ch)) continue;
+        n += WIDE_CH.test(ch) ? 2 : 1;
+    }
+    return n;
+};
+const indentOf = (line) => ((line.match(/^[ \t]*/) || [''])[0]).length;
+
 /**
  * fenced code block -> a dim rail with the language as a title, so the ```
  * markers vanish and the code reads as one block instead of loose prose.
- * Returns null when the line is not a fence.
+ * The rail is pinned to the *fence's* indent and each code line keeps only
+ * what it had beyond that, so a block nested under a list item stays one
+ * straight shape instead of a staircase.
+ * Returns null when the line is not part of a fence.
  */
 function styleFence(line, state) {
-    if (/^\s*```/.test(line)) {
-        const lead = (line.match(/^\s*/) || [''])[0];
-        if (state.inFence) {
+    const at = state.fenceIndent || 0;
+    const m = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(line);
+    if (state.inFence) {
+        // only the same marker with nothing after it closes (a longer fence or
+        // an info string inside a block is content, as in CommonMark)
+        if (m && m[2][0] === (state.fenceChar || '`') && !m[3].trim()) {
             state.inFence = false;
+            state.fenceChar = '';
             state.lang = '';
-            return mdDim(lead + '└─');
+            return ' '.repeat(at) + mdDim('└─');
         }
-        const lang = ((/^\s*```+\s*([^\s`]*)/.exec(line) || [])[1] || '').toLowerCase();
-        state.inFence = true;
-        state.lang = lang;
-        return mdDim(lead + '┌─') + (lang ? ' ' + mdLang(lang) : '');
+        const rest = line.slice(Math.min(indentOf(line), at));
+        // blank lines keep the rail, so the block stays one shape
+        return ' '.repeat(at) + mdDim(rest ? '│ ' : '│') + rest;
     }
-    if (!state.inFence) return null;
-    const lead = (line.match(/^\s*/) || [''])[0];
-    const rest = line.slice(lead.length);
-    // blank lines inside a block keep the rail, so the block stays one shape
-    return rest ? lead + mdDim('│ ') + rest : lead + mdDim('│');
+    if (!m) return null;
+    const lang = (m[3].trim().split(/\s+/)[0] || '').toLowerCase();
+    state.inFence = true;
+    state.fenceChar = m[2][0];
+    state.fenceIndent = m[1].length;
+    state.lang = lang;
+    return m[1] + mdDim('┌─') + (lang ? ' ' + mdLang(lang) : '');
 }
 
-/** one line of model markdown -> styled line; no-op when not a TTY */
-function styleMdLine(line, state) {
-    if (!COLOR) return line;
-    const fenced = styleFence(line, state);
-    if (fenced !== null) return fenced;
-
-    // inline first, on the raw text: inserting escapes earlier would let the
-    // link/bold regexes match their own ANSI sequences
-    let out = line;
+/**
+ * inline markdown -> styled text. `bare` drops link URLs (a table cell has no
+ * room for them). Escapes are inserted after the match, never before, or the
+ * bold/link regexes would match their own ANSI sequences.
+ */
+function styleInline(text, opts = {}) {
     const stash = [];
     const hold = (s) => `\u0001${stash.push(s) - 1}\u0001`;
     const italic = (t) => t.replace(/(^|[^\w*])\*([^*\s][^*]*?)\*(?!\*)/g, (_, pre, s) => pre + mdItalic(s));
 
-    out = out.replace(/`([^`]+)`/g, (_, c) => hold(mdCode(c)));
-    out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, t, u) => hold(mdUnder(t) + ' ' + mdDim(u)));
+    let out = text.replace(/`([^`]+)`/g, (_, c) => hold(mdCode(c)));
+    out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,
+        (_, t, u) => hold(opts.bare ? mdUnder(t) : mdUnder(t) + ' ' + mdDim(u)));
     // ***both***, then **bold** (which may contain *italic* and code), then *italic*
     out = out.replace(/\*\*\*([^*]+)\*\*\*/g, (_, t) => hold(mdBold(mdItalic(t))));
     out = out.replace(/\*\*(.+?)\*\*/g, (_, t) => hold(mdBold(italic(t))));
@@ -1750,34 +1882,231 @@ function styleMdLine(line, state) {
     for (let i = 0; i < 5 && /\u0001\d+\u0001/.test(out); i++) {
         out = out.replace(/\u0001(\d+)\u0001/g, (_, k) => stash[+k]);
     }
+    return out;
+}
 
-    // then line-level markers
+// ------------------------------------------------------------- tables ---
+// A table can only be aligned once every row is known, so rows are buffered
+// and emitted as one block when the table ends (styleMdLine returns null while
+// a row is held). Surrounding pipes are required: `ls | grep` in prose is not
+// a table.
+const isTableRow = (line) => {
+    const t = line.trim();
+    return t.length > 1 && t.startsWith('|') && t.endsWith('|');
+};
+const isRuleCell = (c) => /^:?-+:?$/.test(c.trim());
+
+/** `| a | b \| c |` -> ['a', 'b | c'] */
+function splitCells(line) {
+    const t = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+    return t.split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, '|'));
+}
+
+/** `:--` left, `:-:` centre, `--:` right */
+function cellAlign(spec) {
+    const s = spec.trim();
+    const left = s.startsWith(':');
+    const right = s.endsWith(':');
+    return left && right ? 'center' : right ? 'right' : 'left';
+}
+
+/** one cell, padded out to its column width */
+function padCell(cell, w, align) {
+    const gap = Math.max(0, w - (cell.w || 0));
+    if (align === 'right') return ' '.repeat(gap) + cell.text;
+    if (align === 'center') {
+        const l = Math.floor(gap / 2);
+        return ' '.repeat(l) + cell.text + ' '.repeat(gap - l);
+    }
+    return cell.text + ' '.repeat(gap);
+}
+
+/**
+ * column widths for a table: narrow columns get what they need, the wide ones
+ * share what is left (water filling). Nothing shrinks while everything fits.
+ */
+function fitWidths(needs, avail) {
+    const widths = needs.slice();
+    if (widths.reduce((a, b) => a + b, 0) <= avail) return widths;
+    const order = needs.map((_, i) => i).sort((a, b) => needs[a] - needs[b]);
+    let left = avail, n = needs.length;
+    for (const i of order) {
+        widths[i] = Math.max(3, Math.min(needs[i], Math.floor(left / n)));
+        left -= widths[i];
+        n -= 1;
+    }
+    // floor() leaves a little over: hand it back to whichever column is short
+    let spare = avail - widths.reduce((a, b) => a + b, 0);
+    while (spare > 0) {
+        const i = widths.reduce((bi, w, j) => (w < needs[j] && (bi < 0 || needs[j] - w > needs[bi] - widths[bi]) ? j : bi), -1);
+        if (i < 0) break;
+        widths[i] += 1;
+        spare -= 1;
+    }
+    return widths;
+}
+
+/**
+ * wrap one cell's raw markdown to `w` visible columns. Markup spans are kept
+ * whole (`**bold phrase**` is never cut in half), so each chunk styles on its
+ * own; only a single unbreakable word gets cut, and that one has no markup.
+ */
+function wrapCell(raw, w) {
+    const width = Math.max(1, w);
+    const styledW = (s) => visLen(styleInline(s, { bare: true }));
+    const tokens = raw.match(/`[^`]*`|\*\*\*[^*]*\*\*\*|\*\*[^*]*\*\*|__[^_]*__|\*[^*\s][^*]*\*|\[[^\]]*\]\([^)]*\)|\S+/g) || [];
+    // a span wider than the column is split *inside*: each piece keeps its
+    // markers, so nothing renders as a stray `**` or a swallowed half-string
+    const splitToken = (tok, room) => {
+        const span = /^(\*\*\*|\*\*|\*|__|`)([\s\S]*)\1$/.exec(tok);
+        if (span && room > span[1].length * 2 + 1) {
+            const inner = Math.max(1, room - span[1].length * 2);
+            return wrapCell(span[2], inner).map((c) => span[1] + c + span[1]);
+        }
+        // a single word (a URL, an identifier): cut it, there is no markup here
+        const pieces = [];
+        for (let i = 0; i < tok.length; i += room) pieces.push(tok.slice(i, i + room));
+        return pieces;
+    };
+    const out = [];
+    let cur = '';
+    for (const tok of tokens) {
+        if (cur) {
+            const cand = cur + ' ' + tok;
+            if (styledW(cand) <= width) { cur = cand; continue; }
+            out.push(cur);
+            cur = '';
+        }
+        if (styledW(tok) <= width) { cur = tok; continue; }
+        const pieces = splitToken(tok, width);
+        out.push(...pieces.slice(0, -1));
+        cur = pieces[pieces.length - 1] || '';
+    }
+    if (cur) out.push(cur);
+    return out.length ? out : [''];
+}
+
+/** buffered rows -> aligned block: header bold, the delimiter row becomes a rule */
+function styleTable(rows) {
+    const cells = rows.map(splitCells);
+    const ruleAt = cells.findIndex((cs) => cs.length && cs.every(isRuleCell));
+    const aligns = ruleAt > 0 ? cells[ruleAt].map(cellAlign) : [];
+    const body = cells
+        .map((cs, i) => (i === ruleAt ? null : cs.map((c) => {
+            const text = styleInline(c, { bare: true });
+            return { raw: c, text, w: visLen(text) };
+        })))
+        .filter(Boolean);
+    if (!body.length) return '';
+
+    const cols = Math.max(...body.map((r) => r.length));
+    const needs = [];
+    for (let i = 0; i < cols; i++) needs.push(Math.max(1, ...body.map((r) => (r[i] ? r[i].w : 0))));
+    // the block keeps whatever indent the rows came in with (a table under a
+    // list item stays under it), measured once so every line shares it
+    const indent = ' '.repeat(Math.min(...rows.map(indentOf)));
+    // a table wider than the terminal is not dumped raw: the columns shrink and
+    // the cells wrap, so the grid survives instead of becoming a wall of prose
+    const widths = fitWidths(needs, Math.max(20, COLS()) - indent.length - 3 * (cols - 1));
+    // a pipe block whose first row is not data is the norm in model output, with
+    // or without a delimiter row: bold that row and rule it off either way
+    const hasHeader = body.length > 1;
+    const rule = widths.map((w) => mdDim('─'.repeat(w))).join(mdDim('─┼─'));
+    const out = [];
+
+    body.forEach((row, r) => {
+        // wrap each cell once, then stack the physical lines of the row
+        const wrapped = Array.from({ length: cols }, (_, i) => {
+            const cell = row[i];
+            if (!cell) return [''];
+            if (cell.w <= widths[i]) return [cell.text];
+            return wrapCell(cell.raw, widths[i]).map((c) => styleInline(c, { bare: true }));
+        });
+        const height = Math.max(...wrapped.map((l) => l.length));
+        for (let k = 0; k < height; k++) {
+            const line = Array.from({ length: cols }, (_, i) => {
+                const text = wrapped[i][k] || '';
+                const padded = padCell({ text, w: visLen(text) }, widths[i], aligns[i] || 'left');
+                return r === 0 && hasHeader ? mdBold(padded) : padded;
+            }).join(' ' + mdDim('│') + ' ');
+            out.push(indent + line);
+        }
+        if (r === 0 && hasHeader) out.push(indent + rule);
+    });
+    return out.join('\n');
+}
+
+/** end of a buffered table -> its rendered lines ('' when there was none) */
+function flushTable(state) {
+    const rows = state.rows || [];
+    state.rows = [];
+    return rows.length ? styleTable(rows) : '';
+}
+
+/**
+ * one line of model markdown -> styled line; no-op when not a TTY. Returns
+ * null when the line was buffered (table rows are aligned as a whole block).
+ */
+function styleMdLine(line, state) {
+    if (!COLOR) return line;
+    const fenced = styleFence(line, state);
+    if (fenced !== null) return fenced;
+    if (isTableRow(line)) {
+        if (!state.rows) state.rows = [];
+        state.rows.push(line);
+        return null;
+    }
+    const table = flushTable(state);
+
+    let out = styleInline(line);
+    // then line-level markers: the markers go, the text keeps the emphasis
     out = out
-        .replace(/^(#{1,6})\s+(.*)$/, (_, h, t) => mdDim(h) + ' ' + mdBold(t))
+        .replace(/^(\s*)#{1,6}\s+(.*?)(?:\s+#+)?\s*$/, (_, sp, t) => sp + mdBold(t))
         .replace(/^(\s*)([-*+])\s+/, (_, sp, m) => sp + mdDim(m) + ' ')
         .replace(/^(\s*)(\d+\.)\s+/, (_, sp, m) => sp + mdDim(m) + ' ')
         .replace(/^(\s*)>\s?/, (_, sp) => sp + mdDim('│ '));
-    return out;
+    return table ? table + '\n' + out : out;
 }
 
 /** line-buffered so styles never straddle a chunk boundary */
 function mdStream() {
     let buf = '';
-    const state = { inFence: false };
+    const state = { inFence: false, fenceIndent: 0, fenceChar: '`', lang: '', rows: [] };
+    const emit = (line) => {
+        const out = styleMdLine(line, state);
+        if (out !== null) process.stdout.write(out + '\n');
+    };
     return {
         push(chunk) {
             buf += chunk;
             let i;
             while ((i = buf.indexOf('\n')) >= 0) {
-                process.stdout.write(styleMdLine(buf.slice(0, i), state) + '\n');
+                emit(buf.slice(0, i));
                 buf = buf.slice(i + 1);
             }
         },
         end() {
-            if (buf.length) process.stdout.write(styleMdLine(buf, state) + '\n');
+            if (buf.length) emit(buf);
             buf = '';
+            const table = flushTable(state);
+            if (table) process.stdout.write(table + '\n');
+            // an answer that stops mid-block still closes the rail
+            if (state.inFence) {
+                state.inFence = false;
+                process.stdout.write(' '.repeat(state.fenceIndent || 0) + mdDim('└─') + '\n');
+            }
         },
     };
+}
+
+/**
+ * a panel cannot be taller than the terminal it sits in: rows that scroll off
+ * the top can no longer be erased, so the next redraw printed a second copy
+ * below the first. Keep only the newest rows and the erase always lines up.
+ */
+function capPanelRows(rows, terminalRows) {
+    const max = Math.max(3, (terminalRows || 24) - 1);
+    return rows.length > max ? rows.slice(rows.length - max) : rows;
 }
 
 /** rows drawn below the cursor, so they can be erased again */
@@ -1788,8 +2117,6 @@ const panel = {
 
     erase() {
         if (!TTY || !this.drawn) return;
-        const maxRows = (process.stderr.rows || 24) - 1;
-        if (this.drawn > maxRows) { this.drawn = 0; this.rows = []; return; } // too tall: leave it
         process.stderr.write(`\x1b[${this.drawn}A\r\x1b[J`);
         this.drawn = 0;
     },
@@ -1797,6 +2124,8 @@ const panel = {
     render() {
         if (!TTY) return;
         this.erase();
+        // cap first, erase later: same height on both sides of the redraw
+        this.rows = capPanelRows(this.rows, process.stderr.rows);
         if (this.rows.length) process.stderr.write(this.rows.join('\n') + '\n');
         this.drawn = this.rows.length;
     },
@@ -2031,12 +2360,12 @@ function systemPrompt(interactive) {
         '2. For command questions, always use the `man` tool first (web_search if no entry). File contents and names: never guess — grep first (pattern), then read only those lines.',
         '3. For news, versions, prices or anything that could changed, call web_search (then web_fetch on the best URL). Do not rely on your knowledge.',
         '4. You cannot run shell commands. When a command is needed, print the exact command in a code block and explain it in one line.',
-        '5. Always add your sources (a file, web search, etc).',
+        '5. Always cite your sources (a file, web search, etc).',
         '6. If a tool returns nothing, say so instead of making something up.',
         '7. Plain text, no emoji, no preamble, under 120 words unless asked for detail.',
         '8. Stop calling tools once you have enough to answer. Two searches that did not help means: say so.',
         '9. End with the answer, not with a question or an offer to do more.',
-        '10. Do not call a tool twice with the same arguments. For a large file read the range you need (offset/limit).',
+        '10. Unseen file: read({path, outline:true}) FIRST (symbols/sections with line numbers, very cheap), then read({path, offset:N, limit:M}) for only that range. Never read a whole file. Do not call a tool twice with the same arguments.',
         '11. If you need multiple lookups, make ALL tool calls in the SAME reply; calls in one reply run at the same time.',
         'Example: "where is X configured?" -> grep({"pattern":"X"}), then read the file:line it returns.',
         '',
@@ -2368,7 +2697,7 @@ async function main(argv) {
     if (toolName) {
         const arg = question.join(' ');
         try {
-            const args = toolName === 'read' ? { path: arg }
+            const args = toolName === 'read' ? { path: arg, outline: /\boutline\b/.test(process.env.JERRITO_TOOL_ARGS || '') }
                 : toolName === 'web_fetch' ? { url: arg }
                     : toolName === 'grep' ? { pattern: question[0] || '', path: question[1], glob: question[2] }
                         : toolName === 'man' ? { page: question[0] || '', section: question[1] }
@@ -2463,7 +2792,8 @@ if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
 }
 
 export {
-    htmlToMarkdown, webSearch, webFetch, readTool, TOOLS, ask, CFG, styleMdLine, makeTurnRenderer,
+    htmlToMarkdown, webSearch, webFetch, readTool, TOOLS, ask, CFG, styleMdLine, flushTable,
+    makeTurnRenderer, capPanelRows, fitWidths, wrapCell,
     downloadModel, findServerBinary, findLocalModels, ensureServer, serverArgs, stopServer,
     underPressure, vramFreeBytes, idleSeconds, serverCaps, watchdog, parseSmFreeMiB, systemPrompt,
 };

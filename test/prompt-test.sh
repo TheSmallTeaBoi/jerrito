@@ -70,7 +70,7 @@ has   "prompt names web_fetch" "web_fetch" "$sys"
 has   "prompt forbids running commands" "cannot run shell commands" "$sys"
 # the prompt was rewritten in b575aa5: same intent as before, so these assert the
 # intent in the current wording instead of a sentence that no longer exists
-has   "prompt demands a source" "add your sources" "$sys"
+has   "prompt demands a source" "cite your sources" "$sys"
 has   "prompt warns training data is stale" "Do not rely on your knowledge" "$sys"
 has   "prompt tells the model to batch tool calls" "calls in one reply run at the same time" "$sys"
 has   "prompt ends with the answer rule" "End with the answer" "$sys"

@@ -31,7 +31,9 @@ you what a command does, look something up on the web.
 ```
 grep         search inside project files -> path:line: text (regex, | for alternatives)
 man          read a manual page installed on this system (page [section])
-read         read a file (or list a dir) inside the current project
+read         read a file (or list a dir) inside the current project;
+             outline:true gives a symbol index (functions, classes, headings)
+             with line numbers, to pick a range before reading it
 web_search   DDG lite scraper -> title / url / description only
 web_fetch    curl + HTML -> markdown ("reading mode")
 ```
@@ -443,6 +445,16 @@ export JERRITO_SEARX_URL=http://127.0.0.1:8888   # or "searx": "…" in config.j
 `..` escapes are rejected, binaries and >2 MB files are refused, directories
 return a listing with file sizes, files come back line-numbered with an
 `offset=` continuation hint when truncated.
+
+`read(path, outline:true)` returns a symbol index instead of the body:
+universal-ctags (kind, name, signature, line number) for code, a fence-safe
+heading walker for Markdown. The model uses it to find a range before paying
+for 250 lines of it — the same navigate-then-read pattern `grep` enables for
+names, `outline` enables for structure. If ctags is missing, has no parser for
+the language, or its parser stalls mid-file (the JavaScript one does, on
+regex-heavy code), a conservative regex fallback takes over and the header says
+`approximate`; the packaged flake ships `universal-ctags` so `pkgs.j` always
+has the real thing.
 
 **Context budget.** History over `JERRITO_MAX_CHARS` drops whole old turns; if a
 single turn is still too large (several fetched pages), the oldest tool results

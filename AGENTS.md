@@ -215,20 +215,57 @@ markdown; that is asserted in `render-test`). Data sources:
   markup (flush as soon as it is not `<`/`{`, or after 700 chars).
 - **Empty-answer notice erased** → printed before the panel collapsed, so the
   erase wiped it.
+- **The tool panel drew itself twice** → `panel.erase()` gave up when the panel
+  was taller than the terminal (`drawn > rows - 1`): it cleared `rows`, left the
+  text on screen, and the next redraw printed a second copy below the first. A
+  turn with ~18 tool calls did exactly that, so the same searches appeared twice
+  before the answer. `capPanelRows()` now keeps only the newest `rows - 1` rows
+  (min 3) *before* drawing, so the erase count always matches what is on screen;
+  `erase()` no longer has a bail-out branch.
 - **Markdown** → `**bold *italic* x**` printed raw markers; `\u0001` code
   placeholders leaked inside bold spans.
 - **Code blocks printed as-is** → fenced blocks used to come out as literal
   triple-backtick lines with the code indistinguishable from prose.
   `styleFence()` now drops the backticks and draws a dim rail (`┌─ lang` /
-  `│ code` / `└─`, indent kept, blank lines keep the rail) — decoration only, so
-  piped output is still the raw fence and `render-test` asserts both sides.
+  `│ code` / `└─`, blank lines keep the rail) — decoration only, so piped output
+  is still the raw fence and `render-test` asserts both sides. `~~~` fences work
+  too, and only the same marker with nothing after it closes a block (a longer
+  fence or an info string inside one is content, as in CommonMark).
+- **The rail walked rightwards with the code** → each code line re-added *its
+  own* indent before the rail, so a block nested under a list item came out as a
+  staircase (`   │ x` then `     │ y`). The rail is now pinned to the fence's
+  indent and the code keeps only what it had beyond that: every line of a block
+  shares one straight rail, and the closing `└─` lines up with `┌─`.
+- **`##` titles kept their hashes** → a heading rendered as a dim marker plus
+  bold text, which reads as "not matched at all". The markers go now (leading
+  indent and a trailing `##` are tolerated, so the `##` a list item indents by
+  also matches) and the title is bold; inline markup inside a title still styles.
+- **Tables were passed through raw** → `| Step | Owner |` printed as pipes and
+  dashes. `styleTable()` aligns the columns (widest cell per column,
+  `:--`/`:-:`/`--:` honoured, indent kept), bolds the header and rules it off
+  with a dim `──┼──` line, with `│` between cells and no outer bars. Alignment
+  needs the whole table, so rows are buffered (`styleMdLine` returns `null` for
+  one) and flushed when the table ends — including at the end of an answer, via
+  `mdStream().end()`. Rows must have surrounding pipes, so `ls | grep | wc` in
+  prose stays prose; piped output is untouched (`COLOR` false short-circuits
+  before any buffering).
+- **A wide table was dumped as unaligned pipes** → the first version had a
+  "wider than the terminal" fallback that printed the rows raw, which is exactly
+  what the table was supposed to fix: a real answer (three providers, a
+  paragraph of pricing per cell) printed as a 400-column wall. Now
+  `fitWidths()` shrinks columns water-fill style (narrow ones keep what they
+  need) and `wrapCell()` wraps each cell inside its column, markup spans kept
+  whole, stacking the physical lines of a row — so the grid survives, every
+  line fits `COLS()`, and the rule lands after the header's last line. The
+  first row is the header even when the model forgot the delimiter row (bold +
+  rule; a one-row block gets neither).
 
 ## Tools (five)
 
 | tool | shape / limits |
 | --- | --- |
 | `grep` | regex (with `|`) over project files, optional `path` + `glob`; own walker (`walkFiles`), skips `SKIP` dirs, ignores binaries and >1.5 MB files, 60 matches, invalid regex falls back to literal |
-| `read` | one file with `offset`/`limit` (default 250 lines) or a directory listing; sandboxed to `ROOT` |
+| `read` | one file with `offset`/`limit` (default 250 lines) or a directory listing; sandboxed to `ROOT`; `outline: true` gives a ctags symbol index (Markdown headings for `.md`) with line numbers, heuristic fallback when ctags is absent/no-parser/stalled; a whole-file read (no offset) of a >270-line file **returns the outline instead of the body** — the 2 B model will page big files even when told not to, so it cannot pay for what it is not given |
 | `man` | system man page: `man -s SEC PAGE` as two exec args (no shell, option-looking names rejected), MANWIDTH=100, groff escapes stripped, capped at CFG.chars/2; exit 16 → honest no-entry + best-effort `man -k` suggestions |
 | `web_search` | provider chain, see below |
 | `web_fetch` | readable text from a URL, see below |
@@ -334,7 +371,7 @@ returning navigation as content.
 | `jerrito-tests` | tool shapes, error paths, offline search parsing, cold/warm start, `--status`/`--stop`, symlink install, REPL |
 | `prompt-test` | the prompt: modes, freshness, non-persistence, size, source identity |
 | `agent-tests` | tool loop vs a scripted server: parallel calls (two searches run together and reach the provider within milliseconds), bad args, unknown tool, budget-forced answer, empty response |
-| `render-test` | markdown styling (incl. fenced code rails) + panel collapse through a real pty (`script`) + the footer counting overlapping tool calls once |
+| `render-test` | markdown styling (headings, fenced code rails, aligned tables) + panel collapse through a real pty (`script`) + the footer counting overlapping tool calls once |
 | `fetch-test` | `web_fetch` extraction fixtures; SearXNG / 4get / Bing-RSS parsing and fallbacks; provider racing (a hung scraper adds no latency, the hedge is not contacted when 4get is fast, a dead search is bounded) |
 | `instances-test` | 4get instance auto-update: finder, cache TTL, overrides, self-heal, rotation |
 | `idle-test` | `--sleep-idle-seconds` only on builds that know it, `JERRITO_IDLE=0`, `underPressure()` table, and a real watchdog against a fake `llama-server` (kills under pressure; leaves room, recent activity and a generating server alone) |
