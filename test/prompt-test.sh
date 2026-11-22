@@ -68,8 +68,11 @@ has   "prompt names grep" "grep first" "$sys"
 has   "prompt names web_search" "web_search" "$sys"
 has   "prompt names web_fetch" "web_fetch" "$sys"
 has   "prompt forbids running commands" "cannot run shell commands" "$sys"
-has   "prompt demands a source" "Say where an answer came from" "$sys"
-has   "prompt warns training data is stale" "training data is older than today" "$sys"
+# the prompt was rewritten in b575aa5: same intent as before, so these assert the
+# intent in the current wording instead of a sentence that no longer exists
+has   "prompt demands a source" "add your sources" "$sys"
+has   "prompt warns training data is stale" "Do not rely on your knowledge" "$sys"
+has   "prompt tells the model to batch tool calls" "calls in one reply run at the same time" "$sys"
 has   "prompt ends with the answer rule" "End with the answer" "$sys"
 has   "prompt forbids repeat tool calls" "Do not call a tool twice with the same arguments" "$sys"
 tools=$(LOG="$LOG" last tools)
@@ -100,7 +103,7 @@ rm -rf "$other"
 
 echo
 echo "== one prompt definition, nothing persisted, none in tool mode =="
-n=$(grep -c 'You are "jerrito"' "$H")
+n=$(grep -ci 'You are "jerrito"' "$H")
 [ "$n" = 1 ] && ok "exactly one prompt definition in the source" || no "one prompt definition" "found $n"
 for f in "$HOME/.config/jerrito/config.json" "$HOME/.cache/jerrito/server.json"; do
   if [ -f "$f" ] && grep -q 'You are' "$f"; then no "no prompt text in $(basename "$f")"; else ok "no prompt text in $(basename "$f")"; fi
