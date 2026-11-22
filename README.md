@@ -39,6 +39,12 @@ web_fetch    curl + HTML -> markdown ("reading mode")
 It has **no shell tool**. It cannot run commands — it prints them for you to run.
 That keeps a small model from doing damage and keeps the tool schema tiny.
 
+Tool calls the model makes in one turn run **in parallel** (5 at a time), because
+all five tools are reads: a model that asks two questions in one breath pays one
+round trip, not two. The prompt tells the model to put multiple lookups in one
+reply, and calls that end up written as text are still parsed out and run
+together. Results are fed back in the model's own order.
+
 ## Requirements
 
 Either of these:
@@ -157,6 +163,15 @@ On first use, in order:
    wait for one server instead of racing on the model download or starting two.
    `--stop` shuts it down; a crashed start leaves a lock that expires after 15
    minutes (an ordinary ctrl-c or crash clears it immediately).
+5. **Idle** — the server is not left holding the GPU. After 5 minutes without a
+   request `llama-server` sleeps (its `--sleep-idle-seconds`): the weights leave
+   VRAM, the process stays warm, and the next question wakes it in under a
+   second. A tiny detached watchdog also SIGTERMs the server when something else
+   needs the card — free VRAM under 700 MB and the server quiet for a minute —
+   because a game cannot wait for an idle timer. Both are visible in
+   `j --status` (`sleeps after 300s idle · exits if free VRAM drops below 700 MB
+   · watchdog 1234`). Sleeping keeps the same server; after a pressure kill the
+   next `j` starts a fresh one, so nothing is lost either way.
 
 ### GPU
 
@@ -187,6 +202,8 @@ Everything is overridable in `~/.config/jerrito/config.json`:
   "searx": "http://127.0.0.1:8888",
   "fourget": "https://4get.ca,https://search.m0e.space",
   "serverArgs": ["--jinja", "--flash-attn"],
+  "idleSeconds": 300,
+  "vramFloor": 700,
   "preset": { "args": ["--jinja"], "sampling": { "temperature": 1, "top_p": 0.95, "top_k": 20, "min_p": 0 } }
 }
 ```
@@ -260,12 +277,21 @@ if the model still writes nothing, an explicit note saying so).
 | `JERRITO_4GET_FINDER` | 4get repo | where the instance list is updated from; `off` freezes it |
 | `JERRITO_CTX` | `16384` | server context (the template's tool block is ~7k tokens) |
 | `JERRITO_NGL` | `99` | GPU layers to offload (`0` = CPU only) |
+| `JERRITO_IDLE` | `300` | idle seconds before the server sleeps off VRAM (`0` = never) |
+| `JERRITO_VRAM_FLOOR` | `700` | free VRAM (MB) under which an idle server is stopped |
+| `JERRITO_VRAM_GRACE` | `60` | seconds of quiet the watchdog wants before it acts |
+| `JERRITO_NO_WATCHDOG` | unset | `1` keeps the watchdog process out of it (sleep still works) |
 | `JERRITO_TEMP` | model preset, else `0.2` | temperature |
 | `JERRITO_MAX_TOKENS` | `2048` | max answer tokens (thinking models need room) |
 | `JERRITO_TOP_P` / `_TOP_K` / `_MIN_P` / `_REPEAT_PENALTY` | model preset | sampler overrides |
 | `JERRITO_STEPS` | `8` | tool round-trips before a forced answer |
+| `JERRITO_PARALLEL` | `5` | tool calls run at once (one batch per round) |
 | `JERRITO_MAX_CHARS` | `24000` | history budget (drops oldest turns) |
 | `JERRITO_SEARCH_RESULTS` | `6` | results per search |
+| `JERRITO_SEARCH_TIMEOUT` | `3500` | ms a direct scraper (Bing/DDG/Brave/SearXNG) gets |
+| `JERRITO_4GET_TIMEOUT` | `4000` | ms a 4get instance gets |
+| `JERRITO_SEARCH_HEDGE` | `600` | ms before Bing and DuckDuckGo lite join a slow 4get |
+| `JERRITO_BING` | auto | `off` skips Bing's RSS front end |
 | `JERRITO_FETCH_CHARS` | `6000` | page text kept after markdown conversion |
 | `JERRITO_READ_LINES` | `250` | lines per file read |
 | `JERRITO_STATS` | unset | `1` prints token usage |
@@ -342,15 +368,46 @@ $ j --instances
 - cached in `~/.cache/jerrito/4get-instances.json`, refreshed after 7 days
   (`j --instances refresh` forces it), or immediately when every instance
   in the list fails — that is the self-healing path;
-- the instance that answered last is remembered (`lastGood`) and tried first, so
-  a repeat search is a single request; the others rotate (`cursor`), so one dead
-  instance does not starve the rest;
+- the instance that answered last is remembered (`lastGood`) and put at the front,
+  and the others rotate (`cursor`), so one dead instance does not starve the rest;
+- **instances are asked in parallel** — the first one to answer wins and the rest
+  are aborted, so a dead or glacial instance costs nothing;
 - instances that time out or bot-wall us are skipped for the rest of the session,
   and each instance is asked with `scraper=ddg` then `yandex`, because upstream
   engines get blocked independently of the instance being healthy;
 - `JERRITO_4GET_FINDER=<url>` points the updater elsewhere, `JERRITO_4GET_URL`
   pins your own list and skips the finder entirely, `JERRITO_4GET_URL=off`
   disables 4get.
+
+**Providers race, they do not queue.** A search used to walk the whole chain
+serially — three 4get instances, then DuckDuckGo lite, then DuckDuckGo html, then
+Brave — each with its own timeout, which is how a search could take 17 s. Now:
+
+1. wave 1 — 4get (all candidate instances at once) and your SearXNG, if any;
+2. **hedge** — if none of those has answered after ~0.6 s, **Bing** and
+   DuckDuckGo lite join the same race, so a healthy 4get means neither is
+   contacted at all;
+3. wave 2 — only if wave 1 came back empty: DuckDuckGo html and Brave, in
+   parallel.
+
+The first non-empty answer wins and every other request is aborted, so a search
+costs one provider's latency (~0.6–1 s here) instead of the sum of the chain, and
+a completely dead search is bounded at a couple of seconds instead of half a
+minute. Timeouts only decide when *nothing* worked (`JERRITO_SEARCH_TIMEOUT`,
+`JERRITO_4GET_TIMEOUT`, `JERRITO_SEARCH_HEDGE`).
+
+**Bing's RSS front end** (`&format=rss`) gives the same results as bing.com as
+plain XML: no JavaScript, no bot wall, ~340–1000 ms, and it is the one extra
+engine worth having. Its weakness is that it now and then answers with an
+unrelated feed (localized "popular" hits), so it races as a hedge rather than as
+the primary, and every provider's answer is checked first: if not a single row
+mentions a meaningful word from the query (filler words like *what*/*the* do not
+count), the answer is treated as no results and the race continues.
+`JERRITO_BING=off` skips it.
+
+Engines that were tried and do not work from a CLI: Mojeek (captcha), Qwant (JS
+shell), Ecosia (403), Startpage and public SearXNG instances (Anubis
+proof-of-work), Yahoo (500), Yandex (captcha).
 
 `curl`-check an instance yourself with:
 
@@ -437,6 +494,7 @@ The suites need `llama-server` on PATH; outside Nix use
 | `fetch-test` | `web_fetch` extraction on fixtures (prose vs card grid, boilerplate, index/thin notes, duplicate collapse) and SearXNG JSON / HTML / bot-check handling |
 | `instances-test` | 4get instance auto-update: finder parsing, cache TTL, explicit/off overrides, self-heal when the whole list dies, rotation cursor |
 | `provision-tests` | throwaway `$HOME`s: seeded cache, `-m <path>` remembered, real download byte-exact, cross-cwd reuse |
+| `idle-test` | `--sleep-idle-seconds` only for builds that know it, `JERRITO_IDLE=0`, and a real watchdog against a fake `llama-server`: kills an idle server under VRAM pressure, leaves it alone when there is room, when it was recently used, or while it is generating |
 | `concurrency-test` | two `j` calls at once → exactly one server, lock released |
 | `abort-test` | `SIGINT` mid-generation exits 1 with "aborted", no crash trace |
 

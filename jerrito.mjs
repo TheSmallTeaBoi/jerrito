@@ -34,6 +34,8 @@ const dim = paint('2'), cyan = paint('36'), yellow = paint('33'), red = paint('3
 const PROG = (process.env.JERRITO_PROG || path.basename(process.argv[1] || 'j')).replace(/\.m?js$/, '');
 
 const num = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
+// like num, but 0 is a real answer (`JERRITO_IDLE=0` means "never sleep")
+const num0 = (v, d) => (String(v ?? '').trim() !== '' && Number.isFinite(Number(v)) ? Math.max(0, Number(v)) : d);
 const ENV_BASE = process.env.JERRITO_BASE_URL || process.env.OPENAI_BASE_URL || '';
 
 let CFG = {
@@ -50,6 +52,7 @@ let CFG = {
     maxResults: num(process.env.JERRITO_SEARCH_RESULTS, 6),
     fetchChars: num(process.env.JERRITO_FETCH_CHARS, 6000),
     readLines: num(process.env.JERRITO_READ_LINES, 250),
+    parallel: num(process.env.JERRITO_PARALLEL, 5),   // tool calls run at once, per batch
 };
 if (!/\/v\d+$/.test(CFG.base)) CFG.base += '/v1';
 
@@ -232,11 +235,17 @@ function htmlToMarkdown(html, baseUrl = '') {
 
 // ------------------------------------------------------------------ http ---
 async function httpFetch(url, opts = {}) {
+    // a racing search aborts the losers, so keep both the per-request timeout
+    // and the caller's signal (AbortSignal.any is missing on very old node)
+    const limit = AbortSignal.timeout(opts.timeout || 20000);
+    const signal = opts.signal
+        ? (AbortSignal.any ? AbortSignal.any([limit, opts.signal]) : opts.signal)
+        : limit;
     const res = await fetch(url, {
         method: opts.method || 'GET',
         body: opts.body,
         redirect: 'follow',
-        signal: AbortSignal.timeout(opts.timeout || 20000),
+        signal,
         headers: {
             'user-agent': UA,
             accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
@@ -269,6 +278,38 @@ const fetchErr = (e) => (e.name === 'TimeoutError' ? 'timed out'
     : e.cause?.code || e.cause?.message || e.message || 'fetch failed');
 
 // --------------------------------------------------------- tool: search ----
+// A search must cost one provider's latency, not the sum of every fallback. So
+// providers race in waves and the first non-empty answer wins; the losers are
+// aborted. A slow or dead instance is a loser instead of a 6 s delay.
+const SEARCH_TIMEOUT = num(process.env.JERRITO_SEARCH_TIMEOUT, 3500);   // direct scrapers: DDG, Brave, SearXNG
+const FOURGET_TIMEOUT = num(process.env.JERRITO_4GET_TIMEOUT, 4000);    // 4get instances scrape on their own side
+// how long the proxied sources get on their own before the direct scrapers
+// join the race: keeps the fast path cheap (no DDG/Brave traffic when 4get
+// answers in half a second) without paying for a slow instance
+const SEARCH_HEDGE = num0(process.env.JERRITO_SEARCH_HEDGE, 600);
+
+const sleep = (ms, signal) => new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+});
+
+/** a task that only starts once the faster sources have been quiet for `ms` */
+const hedged = (ms, fn) => async (signal) => {
+    await sleep(ms, signal);
+    return signal?.aborted ? null : fn(signal);
+};
+
+/** resolve with the first non-null answer; null once every promise settles empty */
+const firstNonNull = (promises) => new Promise((resolve) => {
+    let left = promises.length;
+    if (!left) return resolve(null);
+    for (const p of promises) {
+        p.then((v) => { if (v != null) resolve(v); })
+            .catch(() => { })
+            .finally(() => { if (--left === 0) resolve(null); });
+    }
+});
+
 function cleanUrl(href) {
     let u = decodeEntities(href).trim();
     if (/\/l\/\?|\/l\/&/.test(u) || /duckduckgo\.com\/l/.test(u)) {
@@ -295,10 +336,10 @@ function dedupe(rows) {
     return out;
 }
 
-async function searchDDG(query) {
+async function searchDDG(query, signal) {
     const body = new URLSearchParams({ q: query, kl: 'wt-wt' });
     const res = await httpFetch('https://lite.duckduckgo.com/lite/', {
-        method: 'POST', body,
+        method: 'POST', body, signal, timeout: SEARCH_TIMEOUT,
         headers: { 'content-type': 'application/x-www-form-urlencoded', referer: 'https://lite.duckduckgo.com/' },
     });
     const rows = [];
@@ -319,9 +360,9 @@ async function searchDDG(query) {
     return rows;
 }
 
-async function searchDDGHtml(query) {
+async function searchDDGHtml(query, signal) {
     const res = await httpFetch('https://html.duckduckgo.com/html/', {
-        method: 'POST', body: new URLSearchParams({ q: query }),
+        method: 'POST', body: new URLSearchParams({ q: query }), signal, timeout: SEARCH_TIMEOUT,
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
     });
     const rows = [];
@@ -343,8 +384,9 @@ async function searchDDGHtml(query) {
     return rows;
 }
 
-async function searchBrave(query) {
+async function searchBrave(query, signal) {
     const res = await httpFetch('https://search.brave.com/search?q=' + encodeURIComponent(query), {
+        signal, timeout: SEARCH_TIMEOUT,
         headers: { 'accept-language': 'en-US,en;q=0.9' },
     });
     const rows = [];
@@ -361,13 +403,44 @@ async function searchBrave(query) {
 
 const searxBase = () => (process.env.JERRITO_SEARX_URL || readConfig().searx || '').replace(/\/+$/, '');
 
+/**
+ * Bing has a second front end: `&format=rss` returns the same web results as
+ * XML. No JavaScript, no bot wall, ~340 ms measured — by far the fastest direct
+ * provider. It does throttle (an empty feed, not an error), and the RSS is
+ * documented for personal/non-commercial aggregator use, which is what this is.
+ */
+async function searchBing(query, signal) {
+    const res = await httpFetch('https://www.bing.com/search?q=' + encodeURIComponent(query)
+        + '&format=rss&mkt=en-US&setlang=en', {
+        signal, timeout: SEARCH_TIMEOUT,
+        headers: { accept: 'application/rss+xml,application/xml;q=0.9,text/xml;q=0.8,*/*;q=0.5' },
+    });
+    if (res.status === 429) throw new Error('rate-limited (HTTP 429)');
+    if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+
+    // items are XML; fields may carry entities (a description can even hold &lt;b&gt;)
+    const field = (block, tag) => {
+        const raw = (block.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`)) || [])[1] || '';
+        return stripTags(decodeEntities(raw)).replace(/\s+/g, ' ').trim();
+    };
+    const rows = [];
+    for (const m of res.text.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+        const title = field(m[1], 'title');
+        const url = field(m[1], 'link') || (m[1].match(/<link>\s*([^<\s]+)/) || [])[1] || '';
+        if (title && /^https?:\/\//i.test(url)) rows.push({ title, url, desc: field(m[1], 'description') });
+    }
+    // an empty feed is Bing declining to answer (throttling), not "no results"
+    if (!rows.length) throw new Error('empty feed (throttled)');
+    return rows;
+}
+
 // 4get (https://4get.ca) is a search proxy: it scrapes from *its* IP, so it keeps
 // working when our own IP is rate-limited. Public instances come and go, so try
 // the configured list and remember the one that answered.
 const DEFAULT_4GET = ['https://4get.ca', 'https://search.m0e.space'];
 const instancesFile = () => path.join(CACHE_DIR, '4get-instances.json'); // CACHE_DIR is declared later
 const INSTANCES_TTL = 7 * 24 * 3600 * 1000;    // refresh weekly
-const INSTANCES_MAX_TRY = 3;                    // per search, keeps a dead list bounded
+const INSTANCES_MAX_TRY = 4;                    // per search, raced in parallel; keeps a dead list bounded
 const INSTANCES_PER_ENGINE = ['ddg', 'yandex'];
 let fourgetGood = '';
 let fourgetDead = false;
@@ -433,12 +506,16 @@ function rotate(list) {
     const cache = readJson(instancesFile());
     const start = list.length ? (Number(cache?.cursor) || 0) % list.length : 0;
     const ordered = [...list.slice(start), ...list.slice(0, start)];
+    // advance by the number of instances we ask, but always by at least one: with
+    // a short list (2-4 instances) a plain INSTANCES_MAX_TRY would land back on
+    // the same start every time and the rotation would be a no-op
+    const step = Math.max(1, Math.min(INSTANCES_MAX_TRY, list.length - 1));
     // only move the cursor: the cached instance list itself must survive sessions
-    writeJson(instancesFile(), { ...(cache || {}), cursor: (start + INSTANCES_MAX_TRY) % Math.max(1, list.length) });
+    writeJson(instancesFile(), { ...(cache || {}), cursor: (start + step) % Math.max(1, list.length) });
     return ordered;
 }
 
-async function search4get(query) {
+async function search4get(query, signal) {
     if (fourgetDead) throw new Error('not configured');
     const explicit = explicitFourgetBases();
     if (explicit && !explicit.length) throw new Error('not configured');
@@ -447,67 +524,77 @@ async function search4get(query) {
     // remember the instance that worked, across runs too
     const preferred = fourgetGood || readJson(instancesFile())?.lastGood || '';
 
+    /** one instance: ddg, then yandex if that engine is blocked upstream */
+    const askInstance = async (base) => {
+        for (const scraper of INSTANCES_PER_ENGINE) {
+            let res;
+            try {
+                res = await httpFetch(`${base}/api/v1/web?s=${encodeURIComponent(query)}&scraper=${scraper}`, {
+                    timeout: FOURGET_TIMEOUT, headers: { accept: 'application/json' }, signal,
+                });
+            } catch (e) {
+                if (signal?.aborted) return null;      // another provider won: not this instance's fault
+                notes.push(`${hostOf(base)}: ${fetchErr(e)}`); fourgetBad.add(base); return null;
+            }
+            if (signal?.aborted) return null;
+            if (/not a bot|anubis|verifying your browser/i.test(res.text)) {
+                notes.push(`${hostOf(base)}: bot check`); fourgetBad.add(base); return null;
+            }
+            if (res.status === 429 || res.status >= 500) {
+                notes.push(`${hostOf(base)}: HTTP ${res.status}`); fourgetBad.add(base); return null;
+            }
+            if (res.status !== 200) { notes.push(`${hostOf(base)}: HTTP ${res.status}`); return null; }
+
+            let j;
+            try { j = JSON.parse(res.text); } catch { notes.push(`${hostOf(base)}: not JSON`); fourgetBad.add(base); return null; }
+            sawJson = true;
+            if (j.status && String(j.status).toLowerCase() !== 'ok') {
+                notes.push(`${scraper}: ${clip(String(j.status), 50)}`);
+                continue;                                 // that engine was blocked upstream
+            }
+            const rows = (j.web || []).map((r) => ({
+                title: r.title || '',
+                url: r.url || '',
+                desc: String(r.description || '').replace(/\s+/g, ' ').trim(),
+            }));
+            if (rows.length) {
+                fourgetGood = base;
+                writeJson(instancesFile(), { ...(readJson(instancesFile()) || {}), lastGood: base });
+                return rows;
+            }
+            notes.push(`${scraper}: empty`);
+        }
+        return null;
+    };
+
+    // the instances are independent hosts: ask them at the same time and take
+    // whichever answers first, instead of queueing three timeouts
     const tryBases = async (list) => {
         const usable = list.filter((b) => !fourgetBad.has(b));
         const ordered = preferred && usable.includes(preferred)
             ? [preferred, ...rotate(usable.filter((b) => b !== preferred))]
             : rotate(usable);
-        for (const base of ordered.slice(0, INSTANCES_MAX_TRY)) {
-            for (const scraper of INSTANCES_PER_ENGINE) {
-                let res;
-                try {
-                    res = await httpFetch(`${base}/api/v1/web?s=${encodeURIComponent(query)}&scraper=${scraper}`, {
-                        timeout: 6000, headers: { accept: 'application/json' },
-                    });
-                } catch (e) { notes.push(`${hostOf(base)}: ${fetchErr(e)}`); fourgetBad.add(base); break; }
-                if (/not a bot|anubis|verifying your browser/i.test(res.text)) {
-                    notes.push(`${hostOf(base)}: bot check`); fourgetBad.add(base); break;
-                }
-                if (res.status === 429 || res.status >= 500) {
-                    notes.push(`${hostOf(base)}: HTTP ${res.status}`); fourgetBad.add(base); break;
-                }
-                if (res.status !== 200) { notes.push(`${hostOf(base)}: HTTP ${res.status}`); break; }
-
-                let j;
-                try { j = JSON.parse(res.text); } catch { notes.push(`${hostOf(base)}: not JSON`); fourgetBad.add(base); break; }
-                sawJson = true;
-                if (j.status && String(j.status).toLowerCase() !== 'ok') {
-                    notes.push(`${scraper}: ${clip(String(j.status), 50)}`);
-                    continue;                                 // that engine was blocked upstream
-                }
-                const rows = (j.web || []).map((r) => ({
-                    title: r.title || '',
-                    url: r.url || '',
-                    desc: String(r.description || '').replace(/\s+/g, ' ').trim(),
-                }));
-                if (rows.length) {
-                    fourgetGood = base;
-                    writeJson(instancesFile(), { ...(readJson(instancesFile()) || {}), lastGood: base });
-                    return rows;
-                }
-                notes.push(`${scraper}: empty`);
-            }
-        }
-        return null;
+        return firstNonNull(ordered.slice(0, INSTANCES_MAX_TRY).map(askInstance));
     };
 
     let rows = await tryBases(explicit || await autoFourgetBases());
-    if (!rows && !explicit) {
+    if (!rows && !explicit && !signal?.aborted) {
         // every known instance failed: re-read the finder in case the list moved
         const again = await autoFourgetBases({ force: true });
         if (again.length) rows = await tryBases(again);
     }
     if (rows) return rows;
+    if (signal?.aborted) return null;
 
     if (!sawJson) fourgetDead = true;                 // every instance unreachable
     throw new Error(notes.slice(0, 3).join('; ') || 'no results');
 }
 
 /** SearXNG: your own instance (public ones are usually behind bot checks) */
-async function searchSearx(query) {
+async function searchSearx(query, signal) {
     const base = searxBase();
     const res = await httpFetch(`${base}/search?q=${encodeURIComponent(query)}&format=json&language=en`, {
-        headers: { accept: 'application/json' },
+        signal, timeout: SEARCH_TIMEOUT, headers: { accept: 'application/json' },
     });
     if (/anubis|not a bot|verifying your browser|security check|substation/i.test(res.text)) {
         throw new Error('blocked by the instance\'s bot check');
@@ -532,24 +619,86 @@ async function searchSearx(query) {
     return rows;
 }
 
-async function webSearch(query) {
-    const attempts = [];
-    if (!offValue(process.env.JERRITO_4GET_URL ?? readConfig().fourget)) attempts.push(['4get', search4get]);
-    if (searxBase()) attempts.push(['searxng', searchSearx]);
-    attempts.push(['duckduckgo lite', searchDDG], ['duckduckgo html', searchDDGHtml], ['brave', searchBrave]);
-    const notes = [];
-    for (const [name, fn] of attempts) {
-        try {
-            const rows = dedupe(await fn(query)).slice(0, CFG.maxResults);
-            if (rows.length) {
-                return rows.map((r, i) =>
-                    `${i + 1}) ${clip(r.title, 120)}\n   ${r.url}\n   ${clip(r.desc, 240)}`).join('\n');
-            }
-            notes.push(name + ': no results');
-        } catch (e) {
+const fmtRows = (rows) => rows.map((r, i) =>
+    `${i + 1}) ${clip(r.title, 120)}\n   ${r.url}\n   ${clip(r.desc, 240)}`).join('\n');
+
+/**
+ * A provider can answer with a feed that has nothing to do with the query —
+ * Bing's RSS does it now and then (localized "popular" hits), and a stale 4get
+ * instance can return leftover junk. If not one row mentions a query word, the
+ * whole answer is junk: drop it and let the race continue. Rows are kept whole,
+ * never filtered one by one, so a result that merely phrases things differently
+ * survives.
+ */
+const STOPWORDS = new Set(('the and for with what when where which who why how are was were ' +
+    'this that these those from into about than then there their have has had not but all any ' +
+    'can could should would does did doing you your yours our its use using used get got new ' +
+    'latest newest old best more most less least how whats does').split(' '));
+const queryTokens = (q) => [...new Set(String(q).toLowerCase().match(/[a-z0-9]{3,}/g) || [])]
+    .filter((t) => !STOPWORDS.has(t));
+function relevantRows(tokens, rows) {
+    if (!tokens.length || !rows.length) return rows;
+    const related = rows.some((r) => {
+        const text = (r.title + ' ' + r.desc).toLowerCase();
+        return tokens.some((t) => text.includes(t));
+    });
+    return related ? rows : [];
+}
+
+/**
+ * Providers race in a wave; the first non-empty answer wins and the losers are
+ * aborted. Waves rather than one big scrape: the proxied sources go first, the
+ * direct scrapers hedge in behind them (see `hedged` in webSearch), so a working
+ * search costs ~1 s and a broken one is bounded instead of 17 s.
+ */
+async function raceWave(tasks, notes, query = '') {
+    const ac = new AbortController();
+    const t0 = Date.now();
+    const tokens = queryTokens(query);
+    const won = await firstNonNull(tasks.map(([name, fn]) => fn(ac.signal)
+        .then((r) => {
+            const rows = relevantRows(tokens, dedupe(r || [])).slice(0, CFG.maxResults);
+            if (!rows.length) { notes.push(name + ': no results'); return null; }
+            ac.abort();                                   // everyone else: stop
+            // JERRITO_STATS=1 says who answered, which matters when judging results
+            if (CFG.stats) process.stderr.write(dim(`[search via ${name} · ${Date.now() - t0}ms · ${rows.length} rows]\n`));
+            return { name, rows };
+        })
+        .catch((e) => {
+            if (ac.signal.aborted) return null;           // aborted because another provider won
             notes.push(name + ': ' + String(fetchErr(e)).slice(0, 80));
-        }
+            return null;
+        })));
+    return won?.rows || null;
+}
+
+async function webSearch(query) {
+    const fourgetOff = offValue(process.env.JERRITO_4GET_URL ?? readConfig().fourget);
+    const bingOff = offValue(process.env.JERRITO_BING ?? readConfig().bing);
+    const notes = [];
+
+    // wave 1: 4get (scrapes from its own IP) and SearXNG (yours) race each
+    // other. Bing's RSS front end and duckduckgo lite hedge in behind them: both
+    // are direct scrapes of our own IP, so they only start when the proxied
+    // sources are slow — that keeps 4get's better results when it is healthy and
+    // still bounds the search when it is not.
+    const wave1 = [];
+    if (searxBase()) wave1.push(['searxng', (sig) => searchSearx(query, sig)]);
+    if (!fourgetOff) wave1.push(['4get', (sig) => search4get(query, sig)]);
+    if (!bingOff) wave1.push(['bing', hedged(SEARCH_HEDGE, (sig) => searchBing(query, sig))]);
+    // nothing to hedge against (4get and bing both off): start duckduckgo now
+    wave1.push(['duckduckgo lite', hedged(wave1.length ? SEARCH_HEDGE : 0, (sig) => searchDDG(query, sig))]);
+    let rows = await raceWave(wave1, notes, query);
+
+    // wave 2: the remaining scrapers, only when wave 1 came back empty
+    if (!rows) {
+        rows = await raceWave([
+            ['duckduckgo html', (sig) => searchDDGHtml(query, sig)],
+            ['brave', (sig) => searchBrave(query, sig)],
+        ], notes, query);
     }
+
+    if (rows) return fmtRows(rows);
     return `No results for "${query}". [${notes.join('; ')}]`;
 }
 
@@ -822,7 +971,7 @@ const TOOLS = [
         type: 'function',
         function: {
             name: 'web_fetch',
-            description: 'Download a URL and return its main text as markdown (reading mode). Use it after web_search to read a promising result.',
+            description: 'Download a URL and return its main text. Use it after web_search to read a promising result.',
             parameters: {
                 type: 'object',
                 properties: { url: { type: 'string', description: 'http(s) URL' } },
@@ -847,22 +996,37 @@ async function runTool(name, args) {
     }
 }
 
-/** A call a model wrote as text instead of in tool_calls:
- *    <function name="read"><param name="path">a.md</param></function>
- *    <function=read>{"path":"a.md"}</function>
- *    {"name":"read","arguments":{"path":"a.md"}}
- *  Returns { name, args } or null. */
-function parseTextCall(text) {
-    const s = String(text || '').trim();
-    if (!s) return null;
-    const known = new Set(TOOLS.map((t) => t.function.name));
+/** the first JSON value at the start of `s` (balanced braces, strings respected) */
+function jsonPrefix(s) {
+    let depth = 0, inStr = false, esc = false;
+    for (let i = 0; i < s.length; i++) {
+        const c = s[i];
+        if (inStr) {
+            if (esc) esc = false;
+            else if (c === '\\') esc = true;
+            else if (c === '"') inStr = false;
+            continue;
+        }
+        if (c === '"') inStr = true;
+        else if (c === '{' || c === '[') depth++;
+        else if (c === '}' || c === ']') { depth--; if (depth === 0) return s.slice(0, i + 1); }
+    }
+    return null;
+}
+
+/** a call a model wrote as text, at the very start of `s`: { call, rest } or null */
+function takeCall(s, known) {
     const obj = (raw) => {
         const v = String(raw || '').trim().replace(/^```[a-z]*\n?|\n?```$/gi, '');
         try { const j = JSON.parse(v); return j && typeof j === 'object' ? j : null; } catch { return null; }
     };
+    const asArgs = (v) => {
+        const args = typeof v === 'string' ? obj(v) : v;
+        return args && typeof args === 'object' ? args : null;
+    };
 
     // 1. <function name="read"> <param name="path">x</param> </function>
-    let m = /^<function\s+name=["']?([\w.:-]+)["']?\s*>([\s\S]*)<\/function>$/i.exec(s);
+    let m = /^<function\s+name=["']?([\w.:-]+)["']?\s*>([\s\S]*?)<\/function>/i.exec(s);
     if (m && known.has(m[1])) {
         const args = {};
         const re = /<param\s+name=["']?([\w.:-]+)["']?\s*>([\s\S]*?)<\/param>/gi;
@@ -870,25 +1034,70 @@ function parseTextCall(text) {
         while ((p = re.exec(m[2]))) args[p[1]] = /^\s*-?\d+\s*$/.test(p[2]) ? Number(p[2]) : p[2].trim();
         const inline = obj(m[2]);
         if (inline) Object.assign(args, inline);
-        if (Object.keys(args).length) return { name: m[1], args };
+        if (Object.keys(args).length) return { call: { name: m[1], args }, rest: s.slice(m[0].length) };
     }
 
-    // 2. <function=read>{"path":"x"}</function>  (and without the closing tag)
-    m = /^<function=([\w.:-]+)\s*>?\s*([\s\S]*?)(?:<\/function>)?$/i.exec(s);
+    // 2. <function=read>{"path":"x"}</function>  (closing tag optional)
+    m = /^<function=([\w.:-]+)\s*>?\s*(\{[\s\S]*?\})\s*(?:<\/function>)?/i.exec(s);
     if (m && known.has(m[1])) {
-        const args = obj(m[2]);
-        if (args) return { name: m[1], args };
+        const args = asArgs(m[2]);
+        if (args) return { call: { name: m[1], args }, rest: s.slice(m[0].length) };
     }
 
     // 3. a bare {"name": "read", "arguments": {...}}
     if (s.startsWith('{')) {
-        const j = obj(s);
+        const prefix = jsonPrefix(s);
+        const j = prefix && obj(prefix);
         if (j && known.has(j.name)) {
-            const args = typeof j.arguments === 'string' ? obj(j.arguments) : j.arguments;
-            if (args && typeof args === 'object') return { name: j.name, args };
+            const args = asArgs(j.arguments);
+            if (args) return { call: { name: j.name, args }, rest: s.slice(prefix.length) };
         }
     }
     return null;
+}
+
+/** A call a model wrote as text instead of in tool_calls:
+ *    <function name="read"><param name="path">a.md</param></function>
+ *    <function=read>{"path":"a.md"}</function>
+ *    {"name":"read","arguments":{"path":"a.md"}}
+ *  Returns ALL of them, in order, so a model that writes two searches in one
+ *  breath still gets them executed together. Prose that merely mentions a call
+ *  parses as nothing: a call must start at the beginning of the text. */
+function parseTextCalls(text) {
+    let s = String(text || '').trim().replace(/^```[a-z]*\s*/i, '').replace(/```\s*$/i, '').trim();
+    if (!s) return [];
+    const known = new Set(TOOLS.map((t) => t.function.name));
+    const obj = (raw) => {
+        try { const j = JSON.parse(String(raw || '').trim()); return j && typeof j === 'object' ? j : null; } catch { return null; }
+    };
+    const asArgs = (v) => {
+        const args = typeof v === 'string' ? obj(v) : v;
+        return args && typeof args === 'object' ? args : null;
+    };
+    const normalize = (j) => {
+        if (!j || !known.has(j.name)) return null;
+        const args = asArgs(j.arguments ?? j.args ?? j.parameters);
+        return args ? { name: j.name, args } : null;
+    };
+
+    // a JSON array of calls
+    if (s.startsWith('[')) {
+        const prefix = jsonPrefix(s);
+        const arr = prefix && obj(prefix);
+        const calls = Array.isArray(arr) ? arr.map(normalize) : [];
+        if (calls.length && calls.every(Boolean) && !s.slice(prefix.length).trim()) return calls;
+    }
+
+    const calls = [];
+    for (let guard = 0; guard < 10; guard++) {
+        s = s.replace(/^[\s,;]*(?:and|then)\b[\s,;]*/i, '').replace(/^[\s,;]+/, '');
+        if (!s) break;
+        const took = takeCall(s, known);
+        if (!took) break;                     // not a call any more: stop here
+        calls.push(took.call);
+        s = took.rest;
+    }
+    return calls;
 }
 
 const asCall = ({ name, args }) => ({
@@ -905,6 +1114,7 @@ const CACHE_DIR = path.join(HOME, '.cache/jerrito');
 const MODELS_DIR = path.join(CACHE_DIR, 'models');
 const STATE_FILE = path.join(CACHE_DIR, 'server.json');
 const LOG_FILE = path.join(CACHE_DIR, 'llama-server.log');
+const WATCH_LOG = path.join(CACHE_DIR, 'watchdog.log');
 const CONFIG_FILE = path.join(HOME, '.config/jerrito/config.json');
 const LOCK_FILE = path.join(CACHE_DIR, 'server.lock');
 
@@ -1087,7 +1297,7 @@ async function healthy(base, timeout = 1500) {
     } catch { return false; }
 }
 
-function serverArgs(model, port, withJinja) {
+function serverArgs(model, port, withJinja, caps = {}) {
     const cfg = readConfig();
     // 16k default: MiniCPM's chat template renders the tool definitions inline,
     // which costs ~7k tokens before a single word of the question
@@ -1099,10 +1309,25 @@ function serverArgs(model, port, withJinja) {
     const ngl = envNgl !== undefined && envNgl !== '' ? Number(envNgl)
         : cfg.gpuLayers !== undefined ? Number(cfg.gpuLayers) : 99;
     const extra = cfg.serverArgs || [];
+    // idle -> sleep: the weights leave VRAM and the next request wakes the
+    // server (measured ~0.7 s). only llama.cpp builds new enough to know the
+    // flag get it — an unknown argument makes the server refuse to start
+    const idle = caps.sleepIdle ? idleSeconds() : 0;
     return ['-m', model, '-c', String(ctx), '-t', String(threads), '-np', '1',
         '-ngl', String(Number.isFinite(ngl) ? ngl : 99),
         '--host', '127.0.0.1', '--port', String(port),
-        ...(withJinja ? ['--jinja'] : []), ...extra];
+        ...(withJinja ? ['--jinja'] : []),
+        ...(idle > 0 ? ['--sleep-idle-seconds', String(idle)] : []),
+        ...extra];
+}
+
+/** what this llama-server build understands (flags come and go between builds) */
+function serverCaps(bin) {
+    let help = '';
+    try {
+        help = execFileSync(bin, ['--help'], { encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch { }
+    return { sleepIdle: /--sleep-idle-seconds/.test(help) };
 }
 
 function spawnDetached(bin, args) {
@@ -1118,6 +1343,167 @@ function spawnDetached(bin, args) {
 const logTail = (n = 800) => {
     try { return readFileSync(LOG_FILE, 'utf8').slice(-n); } catch { return ''; }
 };
+
+// --------------------------------------------- idle + vram watchdog --------
+// A detached model server nobody asks anything is a leak: ~2 GB of VRAM on a
+// laptop, held forever. Two guards, both cheap:
+//   1. llama.cpp's own --sleep-idle-seconds (see serverArgs): after N idle
+//      seconds the weights leave VRAM, the next request wakes it in under a
+//      second. No process of ours involved, so it also holds if jerrito never
+//      runs again.
+//   2. a detached watchdog (below) that SIGTERMs the server when the GPU comes
+//      under pressure from something else — a game cannot wait for a 5 minute
+//      idle timer, and sleeping still keeps the process.
+// Both are opt-out, and both are invisible unless something happens.
+const cfgNum = (envName, cfgKey, def) => {
+    const v = process.env[envName] !== undefined ? process.env[envName] : readConfig()[cfgKey];
+    return num0(v, def);
+};
+
+/** seconds of idleness before the server sleeps (0 = keep it hot) */
+const idleSeconds = () => cfgNum('JERRITO_IDLE', 'idleSeconds', 300);
+/** free VRAM under this means somebody else needs the card (MB) */
+const vramFloorMb = () => cfgNum('JERRITO_VRAM_FLOOR', 'vramFloor', 700);
+/** how long the server must be quiet before the watchdog acts (seconds) */
+const pressureGraceSec = () => cfgNum('JERRITO_VRAM_GRACE', 'vramGrace', 60);
+
+const mib = (v) => Math.round(Number(v) * 2 ** 20);
+const readInt = (f) => { try { const n = Number(readFileSync(f, 'utf8').trim()); return Number.isFinite(n) ? n : null; } catch { return null; } };
+
+/**
+ * `nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits` prints one
+ * number per GPU, newline-terminated. Parsing that with `Number('')` gives 0 for
+ * the trailing empty line, and `Math.min` then says "no free VRAM" forever — so
+ * blank entries are dropped, never coerced.
+ */
+function parseSmFreeMiB(out) {
+    const vals = String(out).split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+        .map(Number).filter((n) => Number.isFinite(n));
+    return vals.length ? Math.min(...vals) : null;
+}
+
+/**
+ * Free VRAM in bytes, or null when this machine gives us no way to know.
+ * nvidia-smi covers NVIDIA, /sys covers amdgpu, and JERRITO_VRAM_FREE_MB is a
+ * static reading (tests, or a driver we cannot query).
+ */
+function vramFreeBytes() {
+    const forced = process.env.JERRITO_VRAM_FREE_MB;
+    if (forced !== undefined && forced !== '' && Number.isFinite(Number(forced))) return mib(forced);
+    try {
+        const out = execFileSync('nvidia-smi', ['--query-gpu=memory.free', '--format=csv,noheader,nounits'],
+            { encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] });
+        const free = parseSmFreeMiB(out);
+        if (free !== null) return mib(free);           // the tightest GPU is the interesting one
+    } catch { }
+    let free = null;
+    try {
+        for (const card of readdirSync('/sys/class/drm')) {
+            if (!/^card\d+$/.test(card)) continue;
+            const dir = path.join('/sys/class/drm', card, 'device');
+            const total = readInt(path.join(dir, 'mem_info_vram_total'));
+            const used = readInt(path.join(dir, 'mem_info_vram_used'));
+            // total 0 = an integrated GPU with no dedicated VRAM: it cannot be
+            // "out of memory", and counting it would pin free VRAM at 0 forever
+            if (!total || used === null) continue;
+            free = free === null ? total - used : Math.min(free, total - used);
+        }
+    } catch { }
+    return free;
+}
+
+/**
+ * The whole decision, isolated so it can be tested without a GPU: never touch
+ * a server that is working, never guess when VRAM is unreadable, and only act
+ * once the server has been quiet long enough that no tool round is in flight.
+ */
+function underPressure({ freeBytes, floorBytes, idleMs, graceMs, processing = false }) {
+    if (processing) return false;
+    if (freeBytes === null || freeBytes === undefined) return false;
+    if (!(freeBytes < floorBytes)) return false;
+    return idleMs >= graceMs;
+}
+
+/** the server log is written on every request: its mtime is the last activity */
+const lastActivityMs = () => { try { return statSync(LOG_FILE).mtimeMs; } catch { return 0; } };
+
+/** is a generation running right now? (llama.cpp /slots; unknown = no) */
+async function slotsProcessing(base) {
+    if (!base) return false;
+    try {
+        const r = await fetch(base.replace(/\/v\d+\/?$/, '') + '/slots', { signal: AbortSignal.timeout(2000) });
+        if (!r.ok) return false;
+        const slots = await r.json();
+        return Array.isArray(slots) && slots.some((s) => s && s.is_processing);
+    } catch { return false; }
+}
+
+const procCmdline = (pid) => { try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' '); } catch { return ''; } };
+
+/** pid reuse guard: /proc says what it is; no /proc (macOS) means trust the state file */
+const isOurProcess = (pid, re) => {
+    const cmd = procCmdline(pid);
+    return cmd ? re.test(cmd) : true;
+};
+
+/** detached `jerrito --watch <pid> <base>`: kill the server when the GPU is needed */
+async function watchdog(pid, base) {
+    const note = (m) => process.stderr.write(`${new Date().toISOString()} ${m}\n`);
+    if (!pid || !isAlive(pid)) return note(`pid ${pid} is not running — nothing to watch`);
+    const floor = mib(vramFloorMb());
+    const graceMs = pressureGraceSec() * 1000;
+    note(`watching pid ${pid} ${base} · floor ${vramFloorMb()} MB free · quiet ${pressureGraceSec()}s`);
+    while (isAlive(pid)) {
+        await new Promise((r) => setTimeout(r, 5000));
+        const st = readState();
+        if (!st || Number(st.pid) !== Number(pid)) return note(`state now names another server — done`);
+        const freeBytes = vramFreeBytes();
+        const idleMs = Date.now() - lastActivityMs();
+        // /slots is itself a request and would keep the server from ever going
+        // to sleep, so the cheap checks come first and we only ask when a kill
+        // is otherwise justified
+        if (!underPressure({ freeBytes, floorBytes: floor, idleMs, graceMs })) continue;
+        if (await slotsProcessing(base)) continue;
+        if (!isOurProcess(pid, /llama-server/)) return note(`pid ${pid} is not llama-server any more — leaving it alone`);
+        try { process.kill(pid, 'SIGTERM'); } catch { }
+        const now = readState();
+        if (now && Number(now.pid) === Number(pid)) { try { unlinkSync(STATE_FILE); } catch { } }
+        return note(`killed llama-server (pid ${pid}): ${Math.round(freeBytes / 2 ** 20)} MB VRAM free, idle ${Math.round(idleMs / 1000)}s`);
+    }
+    note(`pid ${pid} is gone — done`);
+}
+
+/** start the watchdog; returns its pid, or null when there is nothing to watch */
+function startWatchdog(pid, base) {
+    if (process.env.JERRITO_NO_WATCHDOG === '1') return null;
+    if (vramFreeBytes() === null) return null;          // no readable GPU: idle sleep is all we do
+    try {
+        mkdirSync(CACHE_DIR, { recursive: true });
+        const fd = openSync(WATCH_LOG, 'a');
+        try {
+            const child = spawn(process.execPath, [SOURCE_FILE, '--watch', String(pid), base || ''],
+                { detached: true, stdio: ['ignore', fd, fd] });
+            child.unref();
+            return child.pid;
+        } finally { closeSync(fd); }
+    } catch { return null; }
+}
+
+/** never kill a pid we did not start: only a `--watch` child of jerrito */
+function stopWatchdog(pid) {
+    if (!pid || !isAlive(pid)) return;
+    if (!isOurProcess(pid, /--watch/)) return;
+    try { process.kill(pid, 'SIGTERM'); } catch { }
+}
+
+/** a server started by an older jerrito (or with the watchdog off) gets one now */
+function ensureWatchdog(pid, base) {
+    const st = readState();
+    if (!st || Number(st.pid) !== Number(pid) || !isAlive(pid)) return;
+    if (st.watchPid && isAlive(st.watchPid)) return;
+    const watchPid = startWatchdog(pid, base);
+    if (watchPid) writeJson(STATE_FILE, { ...st, watchPid });
+}
 
 // one spawn at a time: two terminals starting `jerrito` together must not race
 // on the model download or start two servers
@@ -1151,11 +1537,19 @@ async function adoptIfUp(st) {
     return false;
 }
 
+/** adopt the recorded server if it is up, and make sure something is watching it */
+async function adoptExisting() {
+    if (!(await adoptIfUp(readState()))) return false;
+    const st = readState();
+    if (st?.pid) ensureWatchdog(st.pid, st.base);
+    return true;
+}
+
 /** wait for a server another jerrito is starting (or one that is already up) */
 async function waitForServer(ms) {
     const until = Date.now() + ms;
     while (Date.now() < until) {
-        if (await adoptIfUp(readState())) return true;
+        if (await adoptExisting()) return true;
         await new Promise((r) => setTimeout(r, 400));
     }
     return false;
@@ -1182,7 +1576,7 @@ async function ensureServer() {
     }
 
     // 2. a server we started earlier is still warm: reuse it (alive pid wins)
-    if (await adoptIfUp(readState())) return;
+    if (await adoptExisting()) return;
 
     // 3. take the start lock (the model may need a 1.5 GB download)
     if (!acquireLock()) {
@@ -1195,7 +1589,7 @@ async function ensureServer() {
     }
     try {
         // 4. start one (re-check: the other jerrito may have just finished)
-        if (await adoptIfUp(readState())) return;
+        if (await adoptExisting()) return;
 
         const bin = findServerBinary();
         if (!bin) {
@@ -1212,12 +1606,13 @@ async function ensureServer() {
 
         const wantsJinja = Array.isArray(preset.args) ? preset.args.includes('--jinja')
             : /sharp|minicpm|qwen3|gemma|phi/i.test(path.basename(model));
-        let pid = spawnDetached(bin, serverArgs(model, port, wantsJinja));
+        const caps = serverCaps(bin);
+        let pid = spawnDetached(bin, serverArgs(model, port, wantsJinja, caps));
         let ok = await waitHealthy(base, pid, 180000);
         if (!ok && wantsJinja) {
             // some GGUFs ship no template at all; retry without --jinja
             process.stderr.write(dim(' retrying without --jinja'));
-            pid = spawnDetached(bin, serverArgs(model, port, false));
+            pid = spawnDetached(bin, serverArgs(model, port, false, caps));
             ok = await waitHealthy(base, pid, 180000);
         }
         process.stderr.write(TTY ? '\r\x1b[2K' : '\n');
@@ -1226,7 +1621,11 @@ async function ensureServer() {
             throw new Error('llama-server did not start. log: ' + LOG_FILE + (tail ? '\n' + tail : ''));
         }
 
-        writeJson(STATE_FILE, { pid, base, model, preset, started: Date.now() });
+        const st = { pid, base, model, preset, started: Date.now(), idleSeconds: idleSeconds() };
+        writeJson(STATE_FILE, st);
+        // the watchdog needs the state file to confirm the pid is still ours
+        const watchPid = startWatchdog(pid, base);
+        if (watchPid) writeJson(STATE_FILE, { ...st, watchPid });
         CFG.base = base;
         CFG.model = model;
         applyPreset(preset);
@@ -1238,6 +1637,7 @@ async function ensureServer() {
 function stopServer() {
     const st = readState();
     if (!st?.pid) { console.log(`no ${PROG}-managed server running`); return; }
+    stopWatchdog(st.watchPid);
     try { process.kill(st.pid, 'SIGTERM'); } catch { }
     try { unlinkSync(STATE_FILE); } catch { }
     console.log(`stopped llama-server (pid ${st.pid}, ${path.basename(st.model || '')})`);
@@ -1274,6 +1674,14 @@ async function serverStatus() {
     const answering = alive && await healthy(st.base);
     const state = alive ? (answering ? 'running' : 'running (busy or still loading)') : 'stale';
     console.log(`${state} pid=${st.pid} ${st.base} ${path.basename(st.model || '')}`);
+    // what it will do on its own:
+    const idle = st.idleSeconds ?? idleSeconds();
+    const bits = [idle ? `sleeps after ${idle}s idle` : 'never sleeps (JERRITO_IDLE=0)'];
+    if (vramFreeBytes() !== null) {
+        bits.push(`exits if free VRAM drops below ${vramFloorMb()} MB`);
+        bits.push(st.watchPid && isAlive(st.watchPid) ? `watchdog ${st.watchPid}` : 'watchdog not running');
+    }
+    console.log(dim('  ' + bits.join(' · ')));
     if (!alive) console.log(dim(`  the next \`${PROG}\` call will start a fresh one`));
 }
 
@@ -1476,8 +1884,9 @@ function makeTurnRenderer() {
     const calls = [];
     let thinkChars = 0, thinkTail = '', answered = false, drawn = false, lastStatus = 0;
     // footer data: generation speed/tokens, per-tool wall time
-    let tok = 0, genMs = 0, toolCount = 0, toolStart = 0;
-    const toolMs = {};
+    let tok = 0, genMs = 0, toolCount = 0;
+    const starts = [];                       // per call, so parallel calls keep their own timing
+    const spans = [];                        // [{ name, start, end }] once a call has finished
 
     const summary = () => {
         const bits = [];
@@ -1520,21 +1929,22 @@ function makeTurnRenderer() {
         },
 
         tool(name, args) {
+            const id = calls.length;
             calls.push([name, args]);
+            starts[id] = Date.now();
             toolCount++;
-            toolStart = Date.now();
             const w = Math.max(10, COLS() - 6);
             let d = describeCall(name, args);
             if (d.length > w) d = describeCall(name, args, true);
             panel.line(`⚙ ${d.length > w ? clip(d, w) : d}`);
             drawn = true;
+            return id;
         },
 
-        toolResult(text) {
-            if (toolStart) {
-                const name = calls[calls.length - 1]?.[0] || '';
-                toolMs[name] = (toolMs[name] || 0) + (Date.now() - toolStart);
-                toolStart = 0;
+        toolResult(text, id = calls.length - 1) {
+            if (starts[id]) {
+                spans.push({ name: calls[id]?.[0] || '', start: starts[id], end: Date.now() });
+                starts[id] = 0;
             }
             panel.line(`→ ${clip(String(text).split('\n')[0], Math.max(10, COLS() - 10))}`);
             drawn = true;
@@ -1550,11 +1960,25 @@ function makeTurnRenderer() {
          *  piped stdout stays clean markdown */
         footer() {
             if (!TTY || !tok) return;
+            // wall time per tool: overlapping parallel calls count once, so
+            // "search 1.2s" means the turn spent 1.2s waiting on searches
+            const unionMs = (name) => {
+                const list = spans.filter((s) => s.name === name).sort((a, b) => a.start - b.start);
+                let total = 0, from = -1, to = -1;
+                for (const s of list) {
+                    if (s.start > to) {
+                        if (to > from) total += to - from;
+                        from = s.start; to = s.end;
+                    } else to = Math.max(to, s.end);
+                }
+                return to > from ? total + (to - from) : total;
+            };
             const bits = [];
             if (genMs > 0) bits.push(`${(tok / (genMs / 1000)).toFixed(1)} tok/s`);
             bits.push(`${tok} tok`);
-            if (toolMs.web_search) bits.push(`search ${(toolMs.web_search / 1000).toFixed(1)}s`);
-            if (toolMs.web_fetch) bits.push(`fetch ${(toolMs.web_fetch / 1000).toFixed(1)}s`);
+            const searchMs = unionMs('web_search'), fetchMs = unionMs('web_fetch');
+            if (searchMs) bits.push(`search ${(searchMs / 1000).toFixed(1)}s`);
+            if (fetchMs) bits.push(`fetch ${(fetchMs / 1000).toFixed(1)}s`);
             if (toolCount) bits.push(`${toolCount} tool${toolCount === 1 ? '' : 's'}`);
             bits.push(`${((Date.now() - t0) / 1000).toFixed(1)}s`);
             process.stdout.write(mdDim('— ' + bits.join(' · ')) + '\n');
@@ -1603,15 +2027,17 @@ function systemPrompt(interactive) {
         `You are "Jerrito", a terminal assistant on Linux. Today is ${today}. You communicate through the terminal: keep answers short.`,
         mode,
         'Rules:',
-        '1. Every question is in scope; the project is context, not a filter..',
+        '1. Every question is in scope; the project is context, not a filter.',
         '2. For command questions, always use the `man` tool first (web_search if no entry). File contents and names: never guess — grep first (pattern), then read only those lines.',
         '3. For news, versions, prices or anything that could changed, call web_search (then web_fetch on the best URL). Do not rely on your knowledge.',
         '4. You cannot run shell commands. When a command is needed, print the exact command in a code block and explain it in one line.',
-        '5. Always add your sources (a file, web search, etc). If a tool returns nothing, say so instead of making something up.',
-        '6. Plain text, no emoji, no preamble, under 120 words unless asked for detail.',
-        '7. Stop calling tools once you have enough to answer. Two searches that did not help means: say so.',
-        '8. End with the answer, not with a question or an offer to do more.',
-        '9. Do not call a tool twice with the same arguments. For a large file read the range you need (offset/limit).',
+        '5. Always add your sources (a file, web search, etc).',
+        '6. If a tool returns nothing, say so instead of making something up.',
+        '7. Plain text, no emoji, no preamble, under 120 words unless asked for detail.',
+        '8. Stop calling tools once you have enough to answer. Two searches that did not help means: say so.',
+        '9. End with the answer, not with a question or an offer to do more.',
+        '10. Do not call a tool twice with the same arguments. For a large file read the range you need (offset/limit).',
+        '11. If you need multiple lookups, make ALL tool calls in the SAME reply; calls in one reply run at the same time.',
         'Example: "where is X configured?" -> grep({"pattern":"X"}), then read the file:line it returns.',
         '',
         system,
@@ -1673,8 +2099,8 @@ async function complete(messages, signal, render, { allowTools = true } = {}) {
         const j = await res.json();
         const m = j.choices?.[0]?.message || {};
         if (m.reasoning_content) render.think(m.reasoning_content);
-        const textCall = (m.tool_calls || []).length ? null : parseTextCall(m.content || '');
-        if (textCall) return { content: '', toolCalls: [asCall(textCall)] };
+        const textCalls = (m.tool_calls || []).length ? [] : parseTextCalls(m.content || '');
+        if (textCalls.length) return { content: '', toolCalls: textCalls.map(asCall) };
         if (m.content) render.answer(m.content);
         if (CFG.stats) showStats(j.usage);
         const t = j.timings;
@@ -1743,8 +2169,8 @@ async function complete(messages, signal, render, { allowTools = true } = {}) {
         render.usage({ tok: deltas, ms: lastAt - firstAt });
     }
     if (holding) {
-        const textCall = toolCalls.length ? null : parseTextCall(held);
-        if (textCall) return { content: '', toolCalls: [asCall(textCall)] };
+        const textCalls = toolCalls.length ? [] : parseTextCalls(held);
+        if (textCalls.length) return { content: '', toolCalls: textCalls.map(asCall) };
         flush();
     }
     return { content, toolCalls };
@@ -1833,23 +2259,42 @@ async function ask(question, messages, signal) {
             process.stdout.write('\n');
             return content;
         }
-        for (const call of toolCalls) {
-            const fn = call.function?.name || '';
-            let args = {};
-            const raw = call.function?.arguments;
-            if (raw && typeof raw === 'object') args = raw;
-            else { try { args = JSON.parse(raw || '{}') || {}; } catch { } }
-            render.tool(fn, args);
-            let text;
-            try { text = (await runTool(fn, args)).text; }
-            catch (e) { text = `Tool error: ${e.name === 'TimeoutError' ? 'request timed out' : e.message}`; }
-            render.toolResult(text);
-            messages.push({
-                role: 'tool',
-                tool_call_id: call.id || `call_${Math.random().toString(36).slice(2, 10)}`,
-                name: fn || 'unknown',
-                content: text,
+        // The tools are independent reads, so a model that asks three questions
+        // in one turn should not pay for three round trips one after another.
+        // Batches of CFG.parallel (default 5) — a model that spams searches must
+        // not be able to open twenty sockets.
+        for (let i = 0; i < toolCalls.length; i += CFG.parallel) {
+            const batch = toolCalls.slice(i, i + CFG.parallel);
+            // JERRITO_STATS=1 says how the model batched: "2 at once" is the
+            // difference between one round trip and two
+            if (CFG.stats && toolCalls.length > 1) {
+                const names = batch.map((c) => c.function?.name || '?').join(', ');
+                process.stderr.write(dim(`[${batch.length} of ${toolCalls.length} tool calls at once: ${names}]\n`));
+            }
+            const jobs = batch.map((call) => {
+                const fn = call.function?.name || '';
+                let args = {};
+                const raw = call.function?.arguments;
+                if (raw && typeof raw === 'object') args = raw;
+                else { try { args = JSON.parse(raw || '{}') || {}; } catch { } }
+                const id = render.tool(fn, args);
+                return (async () => {
+                    let text;
+                    try { text = (await runTool(fn, args)).text; }
+                    catch (e) { text = `Tool error: ${e.name === 'TimeoutError' ? 'request timed out' : e.message}`; }
+                    render.toolResult(text, id);      // print each result as it lands
+                    return { call, fn, text };
+                })();
             });
+            // history keeps the model's own order, not the completion order
+            for (const { call, fn, text } of await Promise.all(jobs)) {
+                messages.push({
+                    role: 'tool',
+                    tool_call_id: call.id || `call_${Math.random().toString(36).slice(2, 10)}`,
+                    name: fn || 'unknown',
+                    content: text,
+                });
+            }
         }
     }
     // unreachable in practice: the last iteration always answers with tools off
@@ -1880,17 +2325,24 @@ options:
 
 First run: finds llama-server (PATH or nix store), picks a tool-capable .gguf on
 this machine, or downloads Sharp-MiniCPM5-2B once to ~/.cache/jerrito/models,
-then starts it detached on a free port and reuses it. Model + server settings
-live in ~/.config/jerrito/config.json.
+then starts it detached on a free port and reuses it. An idle server releases
+its VRAM (sleeps after ${idleSeconds()}s) and a watchdog stops it outright when
+another program needs the GPU. Model + server settings live in
+~/.config/jerrito/config.json.
 
 env: JERRITO_MODEL_FILE JERRITO_BASE_URL JERRITO_API_KEY JERRITO_TEMP JERRITO_MAX_TOKENS
      JERRITO_TOP_P JERRITO_TOP_K JERRITO_MIN_P JERRITO_REPEAT_PENALTY JERRITO_STATS
-     JERRITO_STEPS JERRITO_MAX_CHARS JERRITO_SEARCH_RESULTS JERRITO_FETCH_CHARS
-     JERRITO_READ_LINES JERRITO_NO_SPAWN JERRITO_BIN_DIR
+     JERRITO_STEPS JERRITO_PARALLEL JERRITO_MAX_CHARS JERRITO_SEARCH_RESULTS
+     JERRITO_SEARCH_TIMEOUT JERRITO_SEARCH_HEDGE JERRITO_FETCH_CHARS
+     JERRITO_READ_LINES JERRITO_NO_SPAWN JERRITO_BIN_DIR JERRITO_IDLE
+     JERRITO_VRAM_FLOOR JERRITO_VRAM_GRACE JERRITO_NO_WATCHDOG JERRITO_BING
 `);
 }
 
 async function main(argv) {
+    // internal: the detached VRAM watchdog (see startWatchdog) — not a user flag
+    if (argv[0] === '--watch') return watchdog(Number(argv[1]), argv[2] || '');
+
     const args = [...argv];
     let toolName = null, question = [], showStatus = false, showInstances = null;
     while (args.length) {
@@ -2013,4 +2465,5 @@ if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
 export {
     htmlToMarkdown, webSearch, webFetch, readTool, TOOLS, ask, CFG, styleMdLine, makeTurnRenderer,
     downloadModel, findServerBinary, findLocalModels, ensureServer, serverArgs, stopServer,
+    underPressure, vramFreeBytes, idleSeconds, serverCaps, watchdog, parseSmFreeMiB, systemPrompt,
 };

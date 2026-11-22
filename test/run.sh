@@ -28,6 +28,7 @@ run render-test
 run fetch-test
 run prompt-test
 run instances-test
+run idle-test
 # real model: spawn/reuse, SIGINT, concurrency
 run concurrency-test
 run abort-test

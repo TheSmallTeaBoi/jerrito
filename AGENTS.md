@@ -118,6 +118,38 @@ copies as `(frozen build — nix profile install . / nix build again to update)`
 If a fix "doesn't work", check that line first: you are probably running an old
 build, or a session started before the fix.
 
+## The server must not hold the GPU hostage
+
+A detached model server nobody asks anything is a leak: ~2 GB of VRAM, held
+forever, on a laptop you also play games on. Two independent guards, on purpose
+(either alone would cover the ordinary case, together they cover the odd one):
+
+1. **`llama.cpp` sleeps itself** — `serverArgs()` passes
+   `--sleep-idle-seconds <JERRITO_IDLE|config.idleSeconds|300>`. After that long
+   with no request the weights leave VRAM, the process stays warm, and the next
+   request wakes it (measured ~0.7 s). No jerrito process involved, so it holds
+   even if you never run `j` again. `JERRITO_IDLE=0` disables it.
+   The flag only exists on recent llama.cpp builds and an unknown argument makes
+   the server refuse to start, so `serverCaps(bin)` greps `llama-server --help`
+   (~9 ms, once per cold start) and the flag is simply not passed on old builds.
+2. **The watchdog** — `startWatchdog()` spawns `node jerrito.mjs --watch <pid>
+   <base>` detached (log: `~/.cache/jerrito/watchdog.log`, pid kept in
+   `server.json` as `watchPid`). Every 5 s it reads free VRAM (`nvidia-smi`, then
+   amdgpu `/sys`, then `JERRITO_VRAM_FREE_MB` as a static override) and SIGTERMs
+   the server when free VRAM is under `JERRITO_VRAM_FLOOR` (700 MB) *and* the
+   server has been quiet for `JERRITO_VRAM_GRACE` (60 s) *and* `/slots` says it
+   is not generating. `JERRITO_NO_WATCHDOG=1` skips it; a machine where VRAM is
+   unreadable gets no watchdog at all. It exits when the server dies, and
+   `--stop` kills it (`stopWatchdog`, guarded by a `/proc` cmdline check).
+
+Decisions live in `underPressure()` — a pure function, so `idle-test` covers the
+whole table (pressure, room to spare, busy, just used, VRAM unreadable) without a
+GPU. Anything that adopts a server (`adoptExisting()`) also makes sure a watchdog
+is alive, so a server started by an older jerrito is not left unwatched.
+
+`j --status` prints the policy it will follow:
+`sleeps after 300s idle · exits if free VRAM drops below 700 MB · watchdog 1234`.
+
 ## The footer
 
 Every answer gets a dim footer line — `— 14.2 tok/s · 187 tok · search 0.8s ·
@@ -137,6 +169,24 @@ markdown; that is asserted in `render-test`). Data sources:
 
 ## Bugs that already bit us (don't reintroduce)
 
+- **`nvidia-smi`'s trailing newline read as "0 MB free"** → the watchdog parsed
+  `--query-gpu=memory.free` with `out.split('\n').map(Number)`, and
+  `Number('')` is `0` — every reading looked like total VRAM exhaustion, so the
+  watchdog killed an idle server exactly 60 s after every restart, and the
+  second guard (`/sys`) returned 0 too because the amdgpu card (2 GB *shared*
+  memory, `mem_info_vram_total = 0`) was counted as a real GPU. `parseSmFreeMiB`
+  now drops blank lines and never coerces them, and cards with `total === 0` are
+  skipped (shared/integrated memory is never "out of memory").
+  `idle-test` parses the real formats and runs the watchdog against stubbed
+  `nvidia-smi` output. If VRAM handling ever "kills servers too eagerly", read
+  `~/.cache/jerrito/watchdog.log` first.
+- **Watchdog polling `/slots` kept the server awake** → the first watchdog asked
+  `/slots` every 5 s, and `/slots` is a *request*: the idle timer reset every
+  time, so the server never slept and VRAM was never freed. The watchdog now
+  checks the free-VRAM floor first and only asks `/slots` when a kill is
+  otherwise justified. Keep it that way: any periodic request to a server you
+  want to sleep defeats the sleep.
+
 - **UTC date in the prompt** → wrong day for the user (fixed: local date).
 - **Busy server judged dead** → `/health` does not answer during generation on a
   single-slot server; jerrito used to spawn a duplicate and could kill a live
@@ -148,6 +198,10 @@ markdown; that is asserted in `render-test`). Data sources:
   invented facts); it now drops the oldest ones whole first.
 - **Summary merged two reads** → `read README.md` and `read README.md:250-499`
   both rendered as one string and collapsed to `×2`; ranges are shown now.
+- **A rotation step of 0** → `rotate()` advanced the cursor by
+  `INSTANCES_MAX_TRY`; with only 2–4 instances, `(0 + 4) % 2 = 0` put the cursor
+  back on the same start every time and the rotation was a no-op. It now steps
+  by `max(1, min(INSTANCES_MAX_TRY, list.length - 1))`.
 - **4get instance cache** → `rotate()` used to write the session-filtered list
   back (21 instances silently became 19), and remembering a working instance
   excluded the alternatives. It now only advances a cursor, keeps the full list,
@@ -186,14 +240,87 @@ project, man = installed commands, web = the rest of the internet. Extend a tool
 before adding one (`grep` carries `path`/`glob` rather than being two tools). The prompt tells the model to grep first and read only the lines it
 finds; `prompt-test` asserts that wording exists.
 
+### Calls in one turn run in parallel
+
+All five tools are reads, so `ask()` runs a turn's tool calls **at the same time**
+(`CFG.parallel` / `JERRITO_PARALLEL`, default 5 per batch — a model that spams
+searches must not open twenty sockets). Results are fed back in the model's own
+order, not the completion order, because history is what the next completion sees.
+Consequences to keep in mind:
+
+- `render.tool()` returns an id and `render.toolResult(text, id)` takes it; the
+  panel prints every `⚙` line first, then each `→` as it lands.
+- the footer's per-tool time is a **union of intervals** (`spans` in the
+  renderer), not a sum, so two overlapping searches show as `search 0.4s`, not
+  `0.8s`. `render-test` pins that through a pty.
+- `JERRITO_STATS=1` prints `[N of M tool calls at once: names]` per batch, which
+  is how you tell a batching problem from a plumbing one.
+- a subagent-style "one slow tool blocks everything" is gone: a dead search and a
+  fast grep finish in one round.
+
+**The model must also be told to batch.** llama.cpp *renders* multiple
+`tool_calls` fine, but a 2 B model often writes its second call as prose
+(`web_search(...)` and then more text) instead of a second call. Rule 11 in the
+prompt says so, and `parseTextCalls()` recovers those too: it takes **all** calls
+written as text — `<function=read>…`, `<function=read>{…}`, bare `{"name":…}` —
+not just the first, separated by newlines, `and`/`then`, or a JSON array of call
+objects. `agent-tests` covers the multi-call-as-text case. If batching rates look
+low, probe with `JERRITO_STATS=1` before touching the parser: the prompt is where
+this has regressed before.
+
 ## Search topology
 
-`web_search` tries, in order: **4get** (JSON API, scrapes from its own IP —
-bypasses our rate limiting; instance list auto-updates from the project's
-`INSTANCES` array and is cached in `~/.cache/jerrito/4get-instances.json`) →
-**SearXNG** if `JERRITO_SEARX_URL` is set → DDG lite → DDG html → Brave.
+`web_search` **races** providers; it does not walk a chain. The first non-empty
+answer wins and every other request is aborted (`raceWave` + `firstNonNull`,
+`AbortController` shared by a wave, `httpFetch` keeps its own timeout *and* the
+wave signal via `AbortSignal.any`):
+
+1. wave 1 — **4get** (JSON API, scrapes from its own IP, so it bypasses our rate
+   limiting; its candidate instances race each other too) and your **SearXNG**
+   if `JERRITO_SEARX_URL` is set;
+2. **hedge** — **Bing** (`&format=rss`: same results as bing.com as XML, ~340 ms,
+   no bot wall) and DDG lite are wrapped in `hedged(SEARCH_HEDGE, …)` (default
+   600 ms), so a healthy 4get means neither is contacted — our IP stays clean —
+   but a slow instance cannot hold the search;
+3. wave 2 — only if wave 1 was empty: DDG html + Brave, in parallel.
+
+Timeouts (`JERRITO_SEARCH_TIMEOUT`, `JERRITO_4GET_TIMEOUT`, `JERRITO_SEARCH_HEDGE`)
+only bound the *failure* path; with racing they never add to a successful search.
 Anti-bot pages and 429s are reported as `rate-limited`, never as "no results".
-Public SearXNG/4get instances are often behind Anubis proof-of-work walls.
+`JERRITO_BING=off` drops Bing. Public SearXNG/4get instances are often behind
+Anubis proof-of-work walls.
+
+Engines that were measured and rejected (2026-11): Mojeek (captcha), Qwant lite
+(JS shell, no result markup), Ecosia (403), Startpage and public SearXNG
+instances (Anubis), Yahoo (500), Yandex (captcha). Bing's *HTML* page is also
+useless (`li.b_algo` present, links rendered by JS) — only its RSS works. Do not
+add a provider without checking that its markup is server-rendered.
+
+**Relevance check.** Every provider's answer goes through `relevantRows(queryTokens,
+rows)` before it can win: an unreliable source sometimes returns a full feed for a
+different query (Bing RSS does it every few queries — "Siete Lunas", "Summer
+Place Apartment Homes" for a sqlite/geography query), so if no row mentions one
+of the query's meaningful words, the answer is discarded as junk and the race
+continues. Stopwords are filtered out first (`STOPWORDS`) — otherwise the word
+"the" makes any Spanish lyric page "relevant". Rows are kept whole, never
+filtered one by one, so a legitimately rephrased result survives. `fetch-test`
+pins both sides (junk dropped, filler-only query still gated).
+
+
+Never put these back in series: a sequential chain of five providers with 6–20 s
+timeouts is how a single search took 17 s. Two other traps:
+
+- an aborted request is **not** evidence that an instance is bad — `search4get`
+  checks `signal.aborted` before `fourgetBad.add(base)`, otherwise racing would
+  poison the instance list;
+- a mocked `fetch` in tests must keep the event loop alive while "hanging" (a
+  `setTimeout` that is cleared on abort), or node exits on an unsettled await
+  instead of exercising the timeout.
+
+`web_fetch` picks the block that looks like prose (paragraph text up, link text
+down), strips chrome by class/id, drops link-only tables, flattens card links to
+`headline — url`, and says so when a page is an index or JS-rendered instead of
+returning navigation as content.
 
 `web_fetch` picks the block that looks like prose (paragraph text up, link text
 down), strips chrome by class/id, drops link-only tables, flattens card links to
@@ -206,10 +333,11 @@ returning navigation as content.
 | --- | --- |
 | `jerrito-tests` | tool shapes, error paths, offline search parsing, cold/warm start, `--status`/`--stop`, symlink install, REPL |
 | `prompt-test` | the prompt: modes, freshness, non-persistence, size, source identity |
-| `agent-tests` | tool loop vs a scripted server: parallel calls, bad args, unknown tool, budget-forced answer, empty response |
-| `render-test` | markdown styling (incl. fenced code rails) + panel collapse through a real pty (`script`) |
-| `fetch-test` | `web_fetch` extraction fixtures; SearXNG / 4get parsing and fallbacks |
+| `agent-tests` | tool loop vs a scripted server: parallel calls (two searches run together and reach the provider within milliseconds), bad args, unknown tool, budget-forced answer, empty response |
+| `render-test` | markdown styling (incl. fenced code rails) + panel collapse through a real pty (`script`) + the footer counting overlapping tool calls once |
+| `fetch-test` | `web_fetch` extraction fixtures; SearXNG / 4get / Bing-RSS parsing and fallbacks; provider racing (a hung scraper adds no latency, the hedge is not contacted when 4get is fast, a dead search is bounded) |
 | `instances-test` | 4get instance auto-update: finder, cache TTL, overrides, self-heal, rotation |
+| `idle-test` | `--sleep-idle-seconds` only on builds that know it, `JERRITO_IDLE=0`, `underPressure()` table, and a real watchdog against a fake `llama-server` (kills under pressure; leaves room, recent activity and a generating server alone) |
 | `concurrency-test` | two simultaneous cold starts, busy-server reuse |
 | `abort-test` | SIGINT mid-generation |
 | `provision-tests` | model discovery, real download, cross-cwd reuse (throwaway `$HOME`s) |
